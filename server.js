@@ -1,10 +1,10 @@
 import 'dotenv/config';
-import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import multer from 'multer';
 import pg from 'pg';
+import { createRemoteJWKSet, jwtVerify, SignJWT } from 'jose';
 import { ApiError, chat, transcribe, speakQuietly, providerKeys } from './ai.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -29,8 +29,9 @@ const hits = new Map();
 function rateLimit(req, res, next) {
   const now = Date.now();
   if (hits.size > 5000) for (const [ip, h] of hits) if (h.reset < now) hits.delete(ip);
-  const h = hits.get(req.ip);
-  if (!h || h.reset < now) { hits.set(req.ip, { count: 1, reset: now + RATE_WINDOW_MS }); return next(); }
+  const who = req.user?.id || req.ip; // per account once signed in
+  const h = hits.get(who);
+  if (!h || h.reset < now) { hits.set(who, { count: 1, reset: now + RATE_WINDOW_MS }); return next(); }
   if (++h.count > RATE_MAX) return res.status(429).json({ error: 'Too many requests. Please wait a few minutes.' });
   next();
 }
@@ -47,7 +48,7 @@ function extractJson(text) {
 }
 
 // ---------- speech -> text (Saaras, or Whisper on Groq) ----------
-app.post('/api/transcribe', rateLimit, upload.single('audio'), async (req, res) => {
+app.post('/api/transcribe', authed, rateLimit, upload.single('audio'), async (req, res) => {
   try {
     if (!req.file?.size) throw new ApiError('No audio received. Tap the mic, speak, then tap again.', 400);
     const { transcript } = await transcribe(req.file);
@@ -100,7 +101,7 @@ function cleanSpec(spec, kind) {
   return { type: 'open' };
 }
 
-app.post('/api/understand', rateLimit, async (req, res) => {
+app.post('/api/understand', authed, rateLimit, async (req, res) => {
   try {
     const text = typeof req.body?.text === 'string' ? req.body.text.trim().slice(0, 600) : '';
     if (!text) throw new ApiError('Say or type what you are doing.', 400);
@@ -147,7 +148,7 @@ app.post('/api/understand', rateLimit, async (req, res) => {
 // ---------- questions about the log ----------
 // The browser sends the last two weeks as compact lines plus totals it computed itself,
 // so the model only has to look things up, never add up.
-app.post('/api/ask', rateLimit, async (req, res) => {
+app.post('/api/ask', authed, rateLimit, async (req, res) => {
   try {
     const question = typeof req.body?.question === 'string' ? req.body.question.trim().slice(0, 400) : '';
     if (!question) throw new ApiError('Ask something about your day.', 400);
@@ -165,7 +166,7 @@ app.post('/api/ask', rateLimit, async (req, res) => {
 });
 
 // ---------- spoken summary of a day ----------
-app.post('/api/summary', rateLimit, async (req, res) => {
+app.post('/api/summary', authed, rateLimit, async (req, res) => {
   try {
     const lines = (Array.isArray(req.body?.lines) ? req.body.lines : []).slice(0, 120).map((l) => String(l).slice(0, 160));
     if (!lines.length) throw new ApiError('Nothing logged on this day yet.', 400);
@@ -181,16 +182,112 @@ app.post('/api/summary', rateLimit, async (req, res) => {
   } catch (e) { fail(res, e, 'Could not summarise the day.'); }
 });
 
-// ---------- cloud sync (Postgres) ----------
-// Single-user app: one passcode (SYNC_PASSCODE) unlocks the log. The browser keeps its own copy and
-// syncs changes; each row carries updated_at (last write wins) and synced_at (server cursor).
+// ---------- accounts: Sign in with Google ----------
+// The browser gets an ID token from Google; we verify it against Google's public keys, then keep the
+// user signed in with our own signed session cookie (30 days, httpOnly). No passwords are stored.
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
+const SESSION_SECRET = process.env.SESSION_SECRET || '';
+const DEV_LOGIN = !process.env.VERCEL && process.env.DEV_LOGIN === '1'; // local testing only, never on Vercel
+const SESSION_COOKIE = 'dc_session';
+const SESSION_DAYS = 30;
+const googleKeys = createRemoteJWKSet(new URL('https://www.googleapis.com/oauth2/v3/certs'));
+const sessionKey = () => {
+  if (SESSION_SECRET.length < 32) throw new ApiError('Server is missing SESSION_SECRET (32+ characters).', 500);
+  return new TextEncoder().encode(SESSION_SECRET);
+};
+
+function readCookie(req, name) {
+  for (const part of String(req.headers.cookie || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0 && part.slice(0, i).trim() === name) return decodeURIComponent(part.slice(i + 1).trim());
+  }
+  return '';
+}
+function setSession(res, token, maxAgeSec) {
+  const secure = process.env.VERCEL || process.env.NODE_ENV === 'production' ? '; Secure' : '';
+  res.append('Set-Cookie', `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSec}${secure}`);
+}
+
+async function signIn(res, profile) {
+  const user = { id: String(profile.sub), email: String(profile.email || ''), name: String(profile.name || profile.email || 'You').slice(0, 80), picture: String(profile.picture || '') };
+  if (db) {
+    await ensureSchema();
+    await db.query(
+      `INSERT INTO dincharya_users (id, email, name, picture) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email, name = EXCLUDED.name, picture = EXCLUDED.picture, last_seen = now()`,
+      [user.id, user.email, user.name, user.picture],
+    );
+  }
+  const token = await new SignJWT({ email: user.email, name: user.name, picture: user.picture })
+    .setProtectedHeader({ alg: 'HS256' }).setSubject(user.id).setIssuedAt().setExpirationTime(`${SESSION_DAYS}d`).sign(sessionKey());
+  setSession(res, token, SESSION_DAYS * 86400);
+  return user;
+}
+
+async function currentUser(req) {
+  const token = readCookie(req, SESSION_COOKIE);
+  if (!token) return null;
+  try {
+    const { payload } = await jwtVerify(token, sessionKey(), { algorithms: ['HS256'] });
+    return { id: payload.sub, email: payload.email, name: payload.name, picture: payload.picture };
+  } catch { return null; }
+}
+
+// every /api route except config and sign-in needs a signed-in user
+async function authed(req, res, next) {
+  try {
+    req.user = await currentUser(req);
+    if (!req.user) return res.status(401).json({ error: 'Please sign in.' });
+    next();
+  } catch (e) { fail(res, e, 'Could not check your sign-in.'); }
+}
+
+app.get('/api/config', (req, res) => res.json({ googleClientId: GOOGLE_CLIENT_ID, devLogin: DEV_LOGIN, cloud: !!db, ai: providerKeys() }));
+
+app.post('/api/auth/google', rateLimit, async (req, res) => {
+  try {
+    if (!GOOGLE_CLIENT_ID) throw new ApiError('Google sign-in is not set up on the server (GOOGLE_CLIENT_ID).', 500);
+    const credential = String(req.body?.credential || '');
+    let payload;
+    try {
+      ({ payload } = await jwtVerify(credential, googleKeys, { issuer: ['https://accounts.google.com', 'accounts.google.com'], audience: GOOGLE_CLIENT_ID }));
+    } catch { throw new ApiError('Google sign-in could not be verified. Please try again.', 401); }
+    if (payload.email && payload.email_verified === false) throw new ApiError('Please use a Google account with a verified email.', 401);
+    res.json({ user: await signIn(res, payload) });
+  } catch (e) { fail(res, e, 'Sign-in failed.'); }
+});
+
+if (DEV_LOGIN) {
+  app.post('/api/auth/dev', async (req, res) => {
+    try {
+      const email = String(req.body?.email || 'dev@localhost').slice(0, 80);
+      res.json({ user: await signIn(res, { sub: `dev-${email}`, email, name: email.split('@')[0] }) });
+    } catch (e) { fail(res, e, 'Sign-in failed.'); }
+  });
+}
+
+app.get('/api/auth/me', authed, (req, res) => res.json({ user: req.user }));
+app.post('/api/auth/logout', (req, res) => { setSession(res, '', 0); res.json({ ok: true }); });
+
+// ---------- each user's log (Postgres) ----------
+// The browser keeps its own copy and syncs changes; each row carries updated_at (last write wins)
+// and synced_at (the cursor for "what changed since I last looked").
 const db = process.env.DATABASE_URL
   ? new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 3, ssl: /localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL) ? false : { rejectUnauthorized: false } })
   : null;
 let schemaReady = null;
 const ensureSchema = () => (schemaReady ??= db.query(`
-  CREATE TABLE IF NOT EXISTS dincharya_entries (
+  CREATE TABLE IF NOT EXISTS dincharya_users (
     id text PRIMARY KEY,
+    email text NOT NULL DEFAULT '',
+    name text NOT NULL DEFAULT '',
+    picture text NOT NULL DEFAULT '',
+    created_at timestamptz NOT NULL DEFAULT now(),
+    last_seen timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE TABLE IF NOT EXISTS dincharya_activities (
+    user_id text NOT NULL REFERENCES dincharya_users (id) ON DELETE CASCADE,
+    id text NOT NULL,
     title text NOT NULL,
     category text NOT NULL,
     start_at timestamptz NOT NULL,
@@ -198,70 +295,68 @@ const ensureSchema = () => (schemaReady ??= db.query(`
     note text NOT NULL DEFAULT '',
     deleted boolean NOT NULL DEFAULT false,
     updated_at timestamptz NOT NULL,
-    synced_at timestamptz NOT NULL DEFAULT now()
+    synced_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, id)
   );
-  CREATE INDEX IF NOT EXISTS dincharya_entries_synced ON dincharya_entries (synced_at);
+  CREATE INDEX IF NOT EXISTS dincharya_activities_sync ON dincharya_activities (user_id, synced_at);
 `).catch((e) => { schemaReady = null; throw e; }));
 
-function requireSync(req) {
-  if (!db) throw new ApiError('Cloud sync is not set up on the server.', 503);
-  const want = process.env.SYNC_PASSCODE || '';
-  const got = String(req.get('x-sync-passcode') || '');
-  const ok = want && got.length === want.length && crypto.timingSafeEqual(Buffer.from(got), Buffer.from(want));
-  if (!ok) throw new ApiError('Wrong passcode.', 401);
-}
-
+function requireDb() { if (!db) throw new ApiError('Cloud sync is not set up on the server.', 503); }
 const ID_RE = /^[\w-]{8,64}$/;
 const asDate = (v) => { const d = new Date(v); return Number.isFinite(d.getTime()) ? d : null; };
 
-app.get('/api/sync/status', (req, res) => res.json({ cloud: !!db, ai: providerKeys() }));
-
-// returns rows changed since the cursor (all rows on first sync)
-app.get('/api/entries', async (req, res) => {
+// rows of this user changed since the cursor (all rows on first sync)
+app.get('/api/entries', authed, async (req, res) => {
   try {
-    requireSync(req);
+    requireDb();
     await ensureSchema();
     const since = asDate(req.query.since);
     const { rows } = await db.query(
-      `SELECT id, title, category, start_at, end_at, note, deleted, updated_at, synced_at FROM dincharya_entries
-       WHERE ($1::timestamptz IS NULL OR synced_at > $1) ORDER BY synced_at LIMIT 5000`,
-      [since],
+      `SELECT id, title, category, start_at, end_at, note, deleted, updated_at, synced_at FROM dincharya_activities
+       WHERE user_id = $1 AND ($2::timestamptz IS NULL OR synced_at > $2) ORDER BY synced_at LIMIT 5000`,
+      [req.user.id, since],
     );
-    const cursor = rows.length ? rows[rows.length - 1].synced_at : since;
     res.json({
-      cursor,
-      entries: rows.map((r) => ({
-        id: r.id, title: r.title, category: r.category, start: r.start_at, end: r.end_at,
-        note: r.note, deleted: r.deleted, updatedAt: r.updated_at,
-      })),
+      cursor: rows.length ? rows[rows.length - 1].synced_at : since,
+      entries: rows.map((r) => ({ id: r.id, title: r.title, category: r.category, start: r.start_at, end: r.end_at, note: r.note, deleted: r.deleted, updatedAt: r.updated_at })),
     });
   } catch (e) { fail(res, e, 'Could not load from the cloud.'); }
 });
 
-// upserts changed rows; an older edit never overwrites a newer one
-app.post('/api/entries', async (req, res) => {
+// upserts this user's changed rows; an older edit never overwrites a newer one
+app.post('/api/entries', authed, async (req, res) => {
   try {
-    requireSync(req);
+    requireDb();
     await ensureSchema();
+    await db.query(`INSERT INTO dincharya_users (id, email, name) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, [req.user.id, req.user.email || '', req.user.name || '']);
     const list = (Array.isArray(req.body?.entries) ? req.body.entries : []).slice(0, 500);
     let saved = 0;
     for (const e of list) {
       const start = asDate(e?.start), updated = asDate(e?.updatedAt), end = e?.end ? asDate(e.end) : null;
       if (!ID_RE.test(String(e?.id)) || !start || !updated) continue;
       const r = await db.query(
-        `INSERT INTO dincharya_entries (id, title, category, start_at, end_at, note, deleted, updated_at, synced_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, clock_timestamp())
-         ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, category = EXCLUDED.category, start_at = EXCLUDED.start_at,
+        `INSERT INTO dincharya_activities (user_id, id, title, category, start_at, end_at, note, deleted, updated_at, synced_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, clock_timestamp())
+         ON CONFLICT (user_id, id) DO UPDATE SET title = EXCLUDED.title, category = EXCLUDED.category, start_at = EXCLUDED.start_at,
            end_at = EXCLUDED.end_at, note = EXCLUDED.note, deleted = EXCLUDED.deleted, updated_at = EXCLUDED.updated_at,
            synced_at = clock_timestamp()
-         WHERE dincharya_entries.updated_at < EXCLUDED.updated_at`,
-        [e.id, String(e.title || '').slice(0, 60) || 'Untitled', CATEGORIES.includes(e.category) ? e.category : 'other',
+         WHERE dincharya_activities.updated_at < EXCLUDED.updated_at`,
+        [req.user.id, e.id, String(e.title || '').slice(0, 60) || 'Untitled', CATEGORIES.includes(e.category) ? e.category : 'other',
           start, end, String(e.note || '').slice(0, 200), !!e.deleted, updated],
       );
       saved += r.rowCount;
     }
     res.json({ saved });
   } catch (e) { fail(res, e, 'Could not save to the cloud.'); }
+});
+
+// "Delete my account": removes the user and every activity (ON DELETE CASCADE), then signs out
+app.delete('/api/account', authed, async (req, res) => {
+  try {
+    if (db) { await ensureSchema(); await db.query('DELETE FROM dincharya_users WHERE id = $1', [req.user.id]); }
+    setSession(res, '', 0);
+    res.json({ ok: true });
+  } catch (e) { fail(res, e, 'Could not delete the account.'); }
 });
 
 app.use((err, _req, res, _next) => {

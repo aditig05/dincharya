@@ -14,6 +14,7 @@
   <link rel="apple-touch-icon" href="icon-192.png">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <link rel="stylesheet" href="style.css">
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
   <header class="top">
@@ -22,18 +23,39 @@
         <h1>Dincharya <span>दिनचर्या</span></h1>
         <p>Say what you're doing. Dincharya keeps your day.</p>
       </div>
-      <div class="top-tools">
+      <div class="top-tools" id="top-tools" hidden>
         <button id="sync" class="sync" type="button" data-state="local" title="Backup and sync">
           <span class="sync-dot" aria-hidden="true"></span><span id="sync-text">This device only</span>
         </button>
-        <button id="settings-btn" class="icon-btn" type="button" aria-label="Settings">
+        <button id="account-btn" class="avatar-btn" type="button" aria-label="Account and settings">
+          <img id="avatar" alt="" referrerpolicy="no-referrer" hidden><span id="avatar-letter"></span>
+        </button>
+        <button id="settings-btn" class="icon-btn" type="button" aria-label="Settings" hidden>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.4 13a7.5 7.5 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.4 7.4 0 0 0-1.7-1L15 3.3h-4L10.7 6a7.4 7.4 0 0 0-1.7 1l-2.5-1-2 3.5L6.6 11a7.5 7.5 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1a7.4 7.4 0 0 0 1.7 1l.3 2.6h4l.3-2.6a7.4 7.4 0 0 0 1.7-1l2.5 1 2-3.5L19.4 13ZM13 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Z" transform="translate(-1 0)"/></svg>
         </button>
       </div>
     </div>
   </header>
 
-  <main class="wrap">
+  <!-- shown until the user signs in -->
+  <section id="signin" class="signin" hidden>
+    <div class="signin-card">
+      <h2>Your day, by voice.</h2>
+      <p class="signin-lead">Say what you're doing, in Hindi or English. Dincharya records when, and keeps your day on every device.</p>
+      <ul class="perks">
+        <li><b>“Break for 30 min”</b> → a timed break with a countdown</li>
+        <li><b>“2 se 5 tak DSA kiya”</b> → logged 2–5 pm on your timeline</li>
+        <li>Weekly view, streaks, and a spoken summary of your day</li>
+        <li>Ask <b>“is hafte kitna padha?”</b> and hear the answer</li>
+      </ul>
+      <div id="gbtn" class="gbtn"></div>
+      <button id="dev-login" class="btn" type="button" hidden>Sign in (local test account)</button>
+      <p id="signin-error" class="error" role="alert" hidden></p>
+      <p class="hint">Your log is private to your Google account. Dincharya only sees your name, email and photo.</p>
+    </div>
+  </section>
+
+  <main class="wrap" id="app" hidden>
     <!-- gentle nudges ("45 min on a break") -->
     <section id="nudge" class="nudge" role="status" aria-live="polite" hidden>
       <p id="nudge-text"></p>
@@ -173,12 +195,16 @@
       <label class="check"><input id="alerts" type="checkbox"> Alert me when a timed activity ends</label>
       <label class="check"><input id="nudges" type="checkbox" checked> Gentle nudges (long breaks, missed meals, long sessions)</label>
 
-      <h4>Backup and sync</h4>
+      <h4>Account</h4>
+      <div class="account">
+        <img id="acc-pic" alt="" referrerpolicy="no-referrer" hidden>
+        <div><b id="acc-name"></b><br><span id="acc-email" class="hint tight"></span></div>
+      </div>
       <p id="sync-help" class="hint tight"></p>
-      <label class="field" id="pass-field">Passcode
-        <input id="passcode" type="password" autocomplete="current-password" placeholder="the passcode set on the server">
-      </label>
-      <p id="pass-status" class="hint tight" role="status"></p>
+      <div class="dlg-actions">
+        <button id="logout-btn" type="button" class="btn">Sign out</button>
+        <button id="delete-btn" type="button" class="btn danger">Delete account</button>
+      </div>
 
       <div class="dlg-actions">
         <button id="export-btn" type="button" class="btn">Download my data</button>

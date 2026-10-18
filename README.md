@@ -31,7 +31,8 @@ A voice-first log of your day. Speak naturally, in English, Hindi or Hinglish, a
 - **Install it:** add it to your phone's home screen like an app; it opens offline and shows alerts as notifications.
 - **Summarise this day:** a short spoken review of your day with one suggestion for tomorrow.
 - **Edit anything, undo anything:** tap an activity to fix it, or undo the last change.
-- **Never lose your log:** saved instantly in the browser (works offline), and backed up to a Postgres database and synced across your phone and laptop with a passcode.
+- **Sign in with Google:** each person gets their own private log, saved to a Postgres database and the same on every device. The browser keeps a copy, so it works offline and syncs when you're back online.
+- **Your data, your call:** download everything as JSON, sign out (the device forgets the log), or delete your account and all its data.
 - **Hindi or English:** speak either or mix them; replies come back in the language you pick.
 
 ## Screenshots
@@ -57,8 +58,8 @@ A voice-first log of your day. Speak naturally, in English, Hindi or Hinglish, a
 
 ```bash
 npm install
-cp .env.example .env      # add SARVAM_API_KEY (+ optional GROQ_API_KEY, GEMINI_API_KEY); DATABASE_URL and SYNC_PASSCODE for sync
+cp .env.example .env      # SARVAM_API_KEY (+ optional GROQ/GEMINI keys), DATABASE_URL, GOOGLE_CLIENT_ID, SESSION_SECRET
 npm start
 ```
 
-Open http://localhost:3000. Without `DATABASE_URL`, Dincharya still works and keeps the log in the browser.
+Open http://localhost:3000. For local testing without Google, set `DEV_LOGIN=1` to get a test sign-in button. Without `DATABASE_URL` the log stays in the browser.

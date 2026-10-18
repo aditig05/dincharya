@@ -1,7 +1,7 @@
 // Dincharya: a voice-first log of your day.
-// Everything is saved in this browser first (instant, works offline) and synced to the server's
-// database when a passcode is set, so a refresh, a cleared browser or a new phone loses nothing.
-const KEYS = { nudges: 'dincharya.nudges', nudged: 'dincharya.nudged', installNo: 'dincharya.install-no', entries: 'dincharya.entries.v1', dirty: 'dincharya.dirty.v1', cursor: 'dincharya.cursor.v1', pass: 'dincharya.passcode', lang: 'dincharya.lang', voice: 'dincharya.voice', alerts: 'dincharya.alerts', resume: 'dincharya.resume' };
+// Everything is saved in this browser first (instant, works offline) and synced to the signed-in
+// account in the server's database, so a refresh, a cleared browser or a new phone loses nothing.
+const KEYS = { owner: 'dincharya.owner', nudges: 'dincharya.nudges', nudged: 'dincharya.nudged', installNo: 'dincharya.install-no', entries: 'dincharya.entries.v1', dirty: 'dincharya.dirty.v1', cursor: 'dincharya.cursor.v1', lang: 'dincharya.lang', voice: 'dincharya.voice', alerts: 'dincharya.alerts', resume: 'dincharya.resume' };
 const MAX_SECONDS = 28; // Sarvam REST speech-to-text accepts up to 30 s
 const CATS = {
   work: 'Work', study: 'Study', meal: 'Meal', break: 'Break', exercise: 'Exercise', sleep: 'Sleep',
@@ -205,6 +205,7 @@ async function api(path, options = {}) {
   catch { throw Object.assign(new Error('You seem to be offline.'), { offline: true }); }
   let data = {};
   try { data = await res.json(); } catch { /* not JSON */ }
+  if (res.status === 401 && signedIn && !path.startsWith('/api/auth/')) showSignin('Your session ended. Please sign in again.');
   if (!res.ok) throw Object.assign(new Error(data.error || `Request failed (${res.status})`), { status: res.status });
   return data;
 }
@@ -598,20 +599,20 @@ $('summary-btn').onclick = async () => {
 };
 
 // ---------- sync with the server database ----------
-let cloud = false, syncTimer = null, syncing = false, syncAgain = false;
+// Signed-in users only: the session cookie identifies the account, so no passcode is needed.
+let cloud = false, signedIn = false, syncTimer = null, syncing = false, syncAgain = false;
 function syncState(state, text) { $('sync').dataset.state = state; $('sync-text').textContent = text; }
-const passcode = () => store.get(KEYS.pass, '');
 
 function scheduleSync() { clearTimeout(syncTimer); syncTimer = setTimeout(syncNow, 600); }
 
 async function syncNow() {
+  if (!signedIn) return;
   if (!cloud) { syncState('local', 'This device only'); return; }
-  if (!passcode()) { syncState('local', 'Set up sync'); return; }
   if (!navigator.onLine) { syncState('offline', 'Offline · saved here'); return; }
   if (syncing) { syncAgain = true; return; }
   syncing = true;
   syncState('saving', 'Syncing…');
-  const headers = { 'Content-Type': 'application/json', 'x-sync-passcode': passcode() };
+  const headers = { 'Content-Type': 'application/json' };
   try {
     // push local changes
     const ids = [...dirty];
@@ -620,7 +621,7 @@ async function syncNow() {
       await api('/api/entries', { method: 'POST', headers, body: JSON.stringify({ entries: batch }) });
       ids.forEach((id) => dirty.delete(id));
     }
-    // pull what changed elsewhere
+    // pull what changed on other devices
     const cursor = store.get(KEYS.cursor, null);
     const data = await api('/api/entries' + (cursor ? `?since=${encodeURIComponent(cursor)}` : ''), { headers });
     let changed = false;
@@ -638,37 +639,129 @@ async function syncNow() {
     store.set(KEYS.dirty, [...dirty]);
     if (changed) render();
     syncState('synced', 'Synced');
-    $('pass-status').textContent = 'Connected. Your log is backed up and syncs across devices.';
   } catch (e) {
-    if (e.status === 401) { syncState('error', 'Wrong passcode'); $('pass-status').textContent = 'That passcode is wrong.'; }
-    else if (e.offline) syncState('offline', 'Offline · saved here');
-    else syncState('error', 'Sync failed');
+    if (e.offline) syncState('offline', 'Offline · saved here');
+    else if (e.status !== 401) syncState('error', 'Sync failed');
   } finally {
     syncing = false;
     store.set(KEYS.dirty, [...dirty]);
     if (syncAgain) { syncAgain = false; scheduleSync(); }
   }
 }
-
-async function initSync() {
-  try { cloud = !!(await api('/api/sync/status')).cloud; } catch { cloud = false; }
-  $('sync-help').textContent = cloud
-    ? 'Enter the passcode once on each device. Your log is then backed up online and the same on your phone and laptop.'
-    : 'Cloud sync is not set up on this server, so your log is saved only in this browser. Download a copy now and then.';
-  $('pass-field').hidden = !cloud;
-  syncNow();
-}
 window.addEventListener('online', scheduleSync);
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { render(); syncNow(); } });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && signedIn) { render(); syncNow(); } });
 setInterval(syncNow, 60 * 1000);
+
+// ---------- sign in with Google ----------
+let config = {};
+function wipeLocal() {
+  for (const k of [KEYS.entries, KEYS.dirty, KEYS.cursor, KEYS.owner, KEYS.resume, KEYS.nudged]) { try { localStorage.removeItem(k); } catch { /* blocked */ } }
+}
+
+function showSignin(message) {
+  signedIn = false;
+  $('app').hidden = true;
+  $('top-tools').hidden = true;
+  $('signin').hidden = false;
+  $('signin-error').hidden = !message;
+  $('signin-error').textContent = message || '';
+  $('dev-login').hidden = !config.devLogin;
+  $('gbtn').hidden = !config.googleClientId;
+  if (!config.googleClientId) {
+    if (!config.devLogin) { $('signin-error').textContent = 'Sign-in is not set up on this server yet.'; $('signin-error').hidden = false; }
+    return;
+  }
+  // the Google script loads asynchronously
+  const ready = () => {
+    if (!window.google?.accounts?.id) { setTimeout(ready, 150); return; }
+    google.accounts.id.initialize({ client_id: config.googleClientId, callback: onGoogleCredential, auto_select: true, cancel_on_tap_outside: true });
+    google.accounts.id.renderButton($('gbtn'), { theme: 'filled_black', size: 'large', shape: 'pill', text: 'continue_with', width: 280 });
+    google.accounts.id.prompt(); // One Tap, when the browser allows it
+  };
+  ready();
+}
+
+async function onGoogleCredential(resp) {
+  try {
+    const { user } = await api('/api/auth/google', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ credential: resp.credential }) });
+    startApp(user);
+  } catch (e) { showSignin(e.message); }
+}
+$('dev-login').onclick = async () => {
+  try {
+    const { user } = await api('/api/auth/dev', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'tester@localhost' }) });
+    startApp(user);
+  } catch (e) { showSignin(e.message); }
+};
+
+function startApp(user) {
+  // this browser's copy belongs to one account; switching accounts starts fresh
+  const owner = store.get(KEYS.owner, null);
+  if (owner && owner !== user.id) {
+    wipeLocal();
+    entries = []; dirty = new Set();
+  } else if (!owner) {
+    entries.forEach((e) => dirty.add(e.id)); // anything logged here before signing in moves into the account
+  }
+  store.set(KEYS.owner, user.id);
+  store.set(KEYS.dirty, [...dirty]);
+  signedIn = true;
+  $('signin').hidden = true;
+  $('app').hidden = false;
+  $('top-tools').hidden = false;
+  const letter = (user.name || user.email || '?').trim().charAt(0).toUpperCase();
+  for (const [img, src] of [[$('avatar'), user.picture], [$('acc-pic'), user.picture]]) { img.hidden = !src; if (src) img.src = src; }
+  $('avatar-letter').textContent = user.picture ? '' : letter;
+  $('acc-name').textContent = user.name || '';
+  $('acc-email').textContent = user.email || '';
+  $('sync-help').textContent = cloud
+    ? 'Your log is saved to your account and is the same on every device you sign in on.'
+    : 'Cloud sync is not set up on this server yet, so your log is saved only in this browser. Download a copy now and then.';
+  render();
+  syncNow();
+  checkNudges();
+}
+
+async function boot() {
+  try { config = await api('/api/config'); } catch { config = {}; }
+  cloud = !!config.cloud;
+  try {
+    const { user } = await api('/api/auth/me');
+    startApp(user);
+  } catch (e) {
+    // offline but signed in before: open the local copy; it syncs when the connection is back
+    if (e.offline && store.get(KEYS.owner, null)) { startApp({ id: store.get(KEYS.owner, null), name: '' }); syncState('offline', 'Offline · saved here'); return; }
+    showSignin();
+  }
+}
+
+$('logout-btn').onclick = async () => {
+  busy($('logout-btn'), true);
+  await syncNow(); // don't leave unsynced changes behind
+  if (dirty.size && !confirm('Some changes have not synced yet and will be lost on this device. Sign out anyway?')) { busy($('logout-btn'), false); return; }
+  await api('/api/auth/logout', { method: 'POST' }).catch(() => {});
+  try { google.accounts.id.disableAutoSelect(); } catch { /* script not loaded */ }
+  wipeLocal(); // the log stays in the account; this device forgets it
+  location.reload();
+};
+$('delete-btn').onclick = async () => {
+  if (!confirm('Delete your account and your whole log? This cannot be undone.')) return;
+  busy($('delete-btn'), true);
+  try {
+    await api('/api/account', { method: 'DELETE' });
+    try { google.accounts.id.disableAutoSelect(); } catch { /* script not loaded */ }
+    wipeLocal();
+    location.reload();
+  } catch (e) { toast(e.message); busy($('delete-btn'), false); }
+};
 
 // ---------- settings ----------
 $('lang').value = store.get(KEYS.lang, 'en-IN');
 $('voice').checked = store.get(KEYS.voice, true);
 $('alerts').checked = store.get(KEYS.alerts, false);
 $('nudges').checked = store.get(KEYS.nudges, true);
-$('passcode').value = passcode();
 $('settings-btn').onclick = () => $('settings').showModal();
+$('account-btn').onclick = () => $('settings').showModal();
 $('sync').onclick = () => $('settings').showModal();
 $('settings-save').onclick = () => {
   store.set(KEYS.lang, $('lang').value);
@@ -676,16 +769,8 @@ $('settings-save').onclick = () => {
   store.set(KEYS.alerts, $('alerts').checked);
   store.set(KEYS.nudges, $('nudges').checked);
   checkNudges();
-  const p = $('passcode').value.trim();
-  if (p !== passcode()) {
-    store.set(KEYS.pass, p);
-    store.set(KEYS.cursor, null); // new passcode: pull everything again
-    entries.forEach((e) => dirty.add(e.id)); // and push everything this device has
-    store.set(KEYS.dirty, [...dirty]);
-  }
   if ($('alerts').checked && 'Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {});
   $('settings').close();
-  syncNow();
 };
 $('export-btn').onclick = () => {
   const blob = new Blob([JSON.stringify(live(), null, 2)], { type: 'application/json' });
@@ -955,9 +1040,7 @@ function toast(msg, undo) {
 }
 
 // ---------- start ----------
-render();
-initSync();
-checkNudges();
+boot();
 let lastMinute = new Date().getMinutes();
 setInterval(() => {
   renderNow();

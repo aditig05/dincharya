@@ -219,3 +219,15 @@ dialog::backdrop { background: rgba(29,43,58,.5); }
 .wd.today .wd-name { color: var(--accent-ink); }
 .week-facts { margin: 1rem 0 0; padding-left: 1.1rem; color: var(--ink-soft); font-size: .92rem; display: grid; gap: .2rem; }
 .week-facts b { color: var(--ink); }
+
+/* ---------- sign-in + account ---------- */
+.signin { max-width: 760px; margin: 0 auto; padding: 1.5rem 1rem 3rem; }
+.signin-card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 1.6rem 1.4rem; display: grid; gap: .9rem; justify-items: start; }
+.signin-card h2 { font-size: 1.8rem; font-weight: 800; }
+.signin-lead { margin: 0; font-size: 1.1rem; color: var(--ink-soft); }
+.perks { margin: 0; padding-left: 1.1rem; display: grid; gap: .3rem; }
+.gbtn { min-height: 44px; margin-top: .4rem; }
+.avatar-btn { width: 2.4rem; height: 2.4rem; border-radius: 50%; border: 2px solid rgba(255,255,255,.35); background: var(--accent); color: var(--ink); font-weight: 800; cursor: pointer; padding: 0; overflow: hidden; display: grid; place-items: center; }
+.avatar-btn img { width: 100%; height: 100%; object-fit: cover; }
+.account { display: flex; align-items: center; gap: .7rem; }
+.account img { width: 2.6rem; height: 2.6rem; border-radius: 50%; }
