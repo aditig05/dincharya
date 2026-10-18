@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import multer from 'multer';
 import pg from 'pg';
+import { Pool as NeonPool, neonConfig } from '@neondatabase/serverless';
 import { createRemoteJWKSet, jwtVerify, SignJWT } from 'jose';
 import { ApiError, chat, transcribe, speakQuietly, providerKeys } from './ai.js';
 
@@ -64,18 +65,46 @@ app.use(express.static(path.join(__dirname, 'public'))); // local only; Vercel s
 // AI calls spend Sarvam credits, so cap each visitor (in memory, per instance: a speed bump, not a quota).
 const RATE_WINDOW_MS = 10 * 60 * 1000;
 const RATE_MAX = Number(process.env.RATE_LIMIT_PER_10_MIN) || 80;
+// Shared counter in Upstash Redis when it is connected, so the limit holds across every server
+// instance; otherwise (or if Redis is unreachable) a per-instance counter in memory.
+const REDIS_URL = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || '';
+const REDIS_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || '';
+async function redisCount(key) {
+  const r = await fetch(`${REDIS_URL}/pipeline`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${REDIS_TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify([['INCR', key], ['EXPIRE', key, String(RATE_WINDOW_MS / 1000), 'NX']]),
+    signal: AbortSignal.timeout(1500),
+  });
+  if (!r.ok) throw new Error(`redis ${r.status}`);
+  const [incr] = await r.json();
+  if (incr?.error) throw new Error(incr.error);
+  return Number(incr.result);
+}
 const hits = new Map();
-function rateLimit(req, res, next) {
+function memoryCount(who) {
   const now = Date.now();
-  if (hits.size > 5000) for (const [ip, h] of hits) if (h.reset < now) hits.delete(ip);
-  const who = req.user?.id || req.ip; // per account once signed in
+  if (hits.size > 5000) for (const [k, h] of hits) if (h.reset < now) hits.delete(k);
   const h = hits.get(who);
-  if (!h || h.reset < now) { hits.set(who, { count: 1, reset: now + RATE_WINDOW_MS }); return next(); }
-  if (++h.count > RATE_MAX) return res.status(429).json({ error: 'Too many requests. Please wait a few minutes.' });
+  if (!h || h.reset < now) { hits.set(who, { count: 1, reset: now + RATE_WINDOW_MS }); return 1; }
+  return ++h.count;
+}
+async function rateLimit(req, res, next) {
+  const who = req.user?.id || req.ip; // per account once signed in
+  let count;
+  if (REDIS_URL && REDIS_TOKEN) {
+    try { count = await redisCount(`dincharya:rl:${who}:${Math.floor(Date.now() / RATE_WINDOW_MS)}`); }
+    catch (e) { console.warn(`[rate-limit] redis unavailable, using memory: ${e.message}`); }
+  }
+  count ??= memoryCount(who);
+  if (count > RATE_MAX) return res.status(429).json({ error: 'Too many requests. Please wait a few minutes.' });
   next();
 }
 
-const fail = (res, e, fallback) => res.status(e.status || 500).json({ error: e.status ? e.message : fallback });
+function fail(res, e, fallback) {
+  if (!e.status || e.status >= 500) console.error(`[error] ${res.req?.method} ${res.req?.path}:`, e.message); // visible in Vercel logs
+  res.status(e.status || 500).json({ error: e.status ? e.message : fallback });
+}
 
 // AI calls (Sarvam first, free providers if it fails) live in ai.js.
 
@@ -311,9 +340,26 @@ app.post('/api/auth/logout', (req, res) => { setSession(res, '', 0); res.json({ 
 // ---------- each user's log (Postgres) ----------
 // The browser keeps its own copy and syncs changes; each row carries updated_at (last write wins)
 // and synced_at (the cursor for "what changed since I last looked").
-const db = process.env.DATABASE_URL
-  ? new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 3, ssl: /localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL) ? false : { rejectUnauthorized: false } })
-  : null;
+// Neon is reached with its serverless driver (WebSocket over HTTPS port 443: made for serverless,
+// and works on networks that block Postgres' port 5432). Any other Postgres uses the normal driver.
+const DB_URL = process.env.DATABASE_URL || '';
+neonConfig.webSocketConstructor = globalThis.WebSocket;
+const pool = !DB_URL ? null
+  : /\.neon\.tech/.test(DB_URL) ? new NeonPool({ connectionString: DB_URL, max: 3 })
+    : new pg.Pool({ connectionString: DB_URL, max: 3, ssl: /localhost|127\.0\.0\.1/.test(DB_URL) ? false : { rejectUnauthorized: false } });
+// Neon's free tier sleeps when idle; the first connection while it wakes can fail. Retry brief
+// connection errors (never query errors) a couple of times before giving up.
+const TRANSIENT = /network error|non-101|ECONNRESET|ETIMEDOUT|ECONNREFUSED|Connection terminated|socket hang up/i;
+async function retry(fn) {
+  for (let attempt = 1; ; attempt++) {
+    try { return await fn(); }
+    catch (e) {
+      if (attempt >= 3 || !TRANSIENT.test(String(e?.message))) throw e;
+      await new Promise((r) => setTimeout(r, 250 * attempt));
+    }
+  }
+}
+const db = pool && { query: (...args) => retry(() => pool.query(...args)), connect: () => retry(() => pool.connect()) };
 // Versioned migrations: each runs once, in order, inside a transaction, and is recorded in
 // dincharya_migrations. An advisory lock stops two server instances migrating at the same time.
 // Never edit a released migration; add a new one.
