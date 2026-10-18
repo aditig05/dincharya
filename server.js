@@ -5,16 +5,12 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import multer from 'multer';
 import pg from 'pg';
+import { ApiError, chat, transcribe, speakQuietly, providerKeys } from './ai.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 4 * 1024 * 1024 } }); // Vercel caps bodies at 4.5 MB
 
-const BASE = process.env.SARVAM_BASE_URL || 'https://api.sarvam.ai';
-const CHAT_MODEL = 'sarvam-105b';
-const STT_MODEL = 'saaras:v4';
-const TTS_MODEL = 'bulbul:v3';
-const TTS_SPEAKER = process.env.TTS_SPEAKER || 'priya';
 const CATEGORIES = ['work', 'study', 'meal', 'break', 'exercise', 'sleep', 'commute', 'chores', 'social', 'leisure', 'personal', 'other'];
 
 // Languages Bulbul can speak (Saaras understands 22 Indian languages + English for input).
@@ -46,42 +42,9 @@ function rateLimit(req, res, next) {
   next();
 }
 
-class ApiError extends Error {
-  constructor(message, status = 502) { super(message); this.status = status; }
-}
 const fail = (res, e, fallback) => res.status(e.status || 500).json({ error: e.status ? e.message : fallback });
 
-function requireKey() {
-  if (!process.env.SARVAM_API_KEY) throw new ApiError('Server is missing SARVAM_API_KEY.', 500);
-  return process.env.SARVAM_API_KEY;
-}
-
-async function callSarvam(url, init) {
-  try { return await fetch(url, init); }
-  catch { throw new ApiError('Could not reach Sarvam. Check the internet connection.', 502); }
-}
-
-async function sarvamError(r) {
-  let msg = `Sarvam API returned ${r.status}`;
-  try { const b = await r.json(); const d = b?.error?.message || b?.message; if (d) msg += `: ${d}`; } catch { /* not JSON */ }
-  if (r.status === 429) msg = 'Sarvam rate limit or quota reached. Wait a moment and try again.';
-  if (r.status === 401 || r.status === 403) msg = 'Sarvam rejected the API key. Check SARVAM_API_KEY.';
-  return new ApiError(msg, 502);
-}
-
-// reasoning_effort: null turns off sarvam-105b's hidden thinking: ~0.5 s instead of 5-15 s,
-// and plenty accurate for short extraction and summaries.
-async function chat(messages, maxTokens = 1500, { reasoning = false } = {}) {
-  const r = await callSarvam(`${BASE}/v1/chat/completions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'api-subscription-key': requireKey() },
-    body: JSON.stringify({ model: CHAT_MODEL, messages, temperature: 0.1, max_tokens: maxTokens, ...(reasoning ? {} : { reasoning_effort: null }) }),
-  });
-  if (!r.ok) throw await sarvamError(r);
-  const text = (await r.json())?.choices?.[0]?.message?.content;
-  if (typeof text !== 'string' || !text.trim()) throw new ApiError('The model returned an empty answer. Please try again.');
-  return text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
-}
+// AI calls (Sarvam first, free providers if it fails) live in ai.js.
 
 function extractJson(text) {
   const cleaned = text.replace(/```json|```/g, '');
@@ -90,29 +53,11 @@ function extractJson(text) {
   return JSON.parse(cleaned.slice(start, end + 1));
 }
 
-async function speak(text, code) {
-  const r = await callSarvam(`${BASE}/text-to-speech`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'api-subscription-key': requireKey() },
-    body: JSON.stringify({ text: text.slice(0, 2500), language_code: code, model: TTS_MODEL, speaker: TTS_SPEAKER, output_audio_codec: 'mp3' }),
-  });
-  if (!r.ok) throw await sarvamError(r);
-  return (await r.json())?.audios?.[0] || null;
-}
-const speakQuietly = (text, code) => speak(text, code).catch(() => null); // text still shows if voice fails
-
-// ---------- speech -> text (Saaras) ----------
+// ---------- speech -> text (Saaras, or Whisper on Groq) ----------
 app.post('/api/transcribe', rateLimit, upload.single('audio'), async (req, res) => {
   try {
     if (!req.file?.size) throw new ApiError('No audio received. Tap the mic, speak, then tap again.', 400);
-    const form = new FormData();
-    form.append('file', new Blob([req.file.buffer], { type: (req.file.mimetype || 'audio/webm').split(';')[0] }), req.file.originalname || 'speech.webm');
-    form.append('model', STT_MODEL);
-    form.append('language_code', 'unknown'); // auto-detect Hindi, English, a mix, or any of 22 Indian languages
-    const r = await callSarvam(`${BASE}/speech-to-text`, { method: 'POST', headers: { 'api-subscription-key': requireKey() }, body: form });
-    if (!r.ok) throw await sarvamError(r);
-    const transcript = ((await r.json())?.transcript || '').trim();
-    if (!transcript) throw new ApiError('Could not hear any speech. Try again closer to the mic.', 422);
+    const { transcript } = await transcribe(req.file);
     res.json({ transcript });
   } catch (e) { fail(res, e, 'Transcription failed.'); }
 });
@@ -221,7 +166,7 @@ app.post('/api/ask', rateLimit, async (req, res) => {
         content: `You answer questions about a person's own activity log, like a helpful friend. Today is ${String(req.body?.today || '').slice(0, 40)}. Use ONLY the log and totals given. Quote durations and counts exactly as they appear in the totals; never add up or calculate new numbers. If the log does not contain the answer, say so plainly. Reply in 1 to 3 short sentences, easy to listen to, in ${replyIn(code)}. No markdown, no lists, no emojis.`,
       },
       { role: 'user', content: `${log}\n\nQuestion: ${question}` },
-    ], 800);
+    ], { maxTokens: 800 });
     res.json({ answer, audio: await speakQuietly(answer, code) });
   } catch (e) { fail(res, e, 'Could not answer that.'); }
 });
@@ -238,7 +183,7 @@ app.post('/api/summary', rateLimit, async (req, res) => {
         content: `You review someone's day from their activity log and talk to them like a supportive friend. In 3 to 4 short sentences: what they spent the most time on, how much was breaks/meals vs focused work or study, anything notable (long gaps, late meals, very long sessions), and one small, practical suggestion for tomorrow. Quote numbers ONLY from the "Facts" section exactly as written; never add, subtract or combine durations yourself (the Facts already include the useful groupings). Base suggestions only on the log, and don't invent things that are not in it. Reply in ${replyIn(code)}. No markdown, no lists, no emojis.`,
       },
       { role: 'user', content: `Date: ${String(req.body?.date || '').slice(0, 30)}\nFacts:\n${String(req.body?.totals || '').slice(0, 800)}\nLog:\n${lines.join('\n')}` },
-    ], 800); // the browser computes every number, so no slow reasoning is needed
+    ], { maxTokens: 800 }); // the browser computes every number, so no slow reasoning is needed
     res.json({ summary, audio: await speakQuietly(summary, code) });
   } catch (e) { fail(res, e, 'Could not summarise the day.'); }
 });
@@ -276,7 +221,7 @@ function requireSync(req) {
 const ID_RE = /^[\w-]{8,64}$/;
 const asDate = (v) => { const d = new Date(v); return Number.isFinite(d.getTime()) ? d : null; };
 
-app.get('/api/sync/status', (req, res) => res.json({ cloud: !!db }));
+app.get('/api/sync/status', (req, res) => res.json({ cloud: !!db, ai: providerKeys() }));
 
 // returns rows changed since the cursor (all rows on first sync)
 app.get('/api/entries', async (req, res) => {

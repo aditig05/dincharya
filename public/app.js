@@ -213,11 +213,19 @@ function setReply(msg, isError = false) { $('reply').textContent = msg; $('reply
 function busy(btn, on) { btn.disabled = on; btn.classList.toggle('is-busy', on); }
 
 let replyAudio = null;
-function play(b64) {
-  if (!b64 || !$('voice').checked) return;
+// audio is a data: URI from the server; without one (all voice services failed) the phone reads the text itself
+function play(audio, text) {
+  if (!$('voice').checked) return;
   replyAudio?.pause();
-  replyAudio = new Audio('data:audio/mpeg;base64,' + b64);
-  replyAudio.play().catch(() => { /* autoplay blocked */ });
+  window.speechSynthesis?.cancel();
+  if (audio) {
+    replyAudio = new Audio(audio);
+    replyAudio.play().catch(() => { /* autoplay blocked */ });
+  } else if (text && window.speechSynthesis) {
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = $('lang').value;
+    speechSynthesis.speak(u);
+  }
 }
 
 function describeCurrent() {
@@ -241,11 +249,11 @@ async function understand(text) {
       }),
     });
     if (data.action === 'question') { await askLog(text); return; }
-    if (data.action === 'unclear') { setReply(data.reply || 'Try: “taking a 15 minute break”.', true); play(data.audio); return; }
+    if (data.action === 'unclear') { setReply(data.reply || 'Try: “taking a 15 minute break”.', true); play(data.audio, data.reply); return; }
     const result = applyUnderstanding(data);
     if (!result.ok) { setReply(result.message, true); return; }
     setReply(data.reply || '');
-    play(data.audio);
+    play(data.audio, data.reply);
     $('say-text').value = '';
   } catch (e) {
     setReply(e.offline ? 'You are offline, so I can’t understand speech or sentences right now. Use the quick buttons or “Add manually”.' : e.message, true);
@@ -563,7 +571,8 @@ $('summary-btn').onclick = async () => {
     $('summary-text').textContent = data.summary;
     const audio = $('summary-audio');
     audio.hidden = !data.audio;
-    if (data.audio) { audio.src = 'data:audio/mpeg;base64,' + data.audio; if ($('voice').checked) audio.play().catch(() => {}); }
+    if (data.audio) { audio.src = data.audio; if ($('voice').checked) audio.play().catch(() => {}); }
+    else play(null, data.summary);
     $('summary-box').dataset.day = selectedDay;
     $('summary-box').hidden = false;
   } catch (e) {
@@ -730,7 +739,7 @@ async function askLog(question) {
     body: JSON.stringify({ question, log: logForQuestions(), today: new Date().toDateString(), language_code: $('lang').value }),
   });
   setReply(data.answer);
-  play(data.audio);
+  play(data.audio, data.answer);
   $('say-text').value = '';
 }
 

@@ -50,11 +50,14 @@ A voice-first log of your day. Speak naturally, in English, Hindi, Hinglish or a
 | Sarvam 105B | Turning sentences into activities and times, answering questions about your log, writing the day summary |
 | Bulbul v3 | Speaking replies and summaries |
 
+**When Sarvam credits run out:** every AI call falls back automatically to free providers: Groq (gpt-oss-120b for understanding, Whisper for speech-to-text) and Google Gemini (Flash as a second chat model, Flash TTS for voice). If no voice comes back, the phone reads the reply aloud itself. Set `AI_PROVIDER=free` to skip Sarvam entirely.
+
+
 ## Run locally
 
 ```bash
 npm install
-cp .env.example .env      # add SARVAM_API_KEY; DATABASE_URL and SYNC_PASSCODE for sync
+cp .env.example .env      # add SARVAM_API_KEY (+ optional GROQ_API_KEY, GEMINI_API_KEY); DATABASE_URL and SYNC_PASSCODE for sync
 npm start
 ```
 
