@@ -222,11 +222,26 @@ function play(audio, text) {
     replyAudio = new Audio(audio);
     replyAudio.play().catch(() => { /* autoplay blocked */ });
   } else if (text && window.speechSynthesis) {
+    const pick = phoneVoice(text, $('lang').value);
+    if (!pick) { toast('This phone has no Hindi voice. Switch replies to English in Settings to hear them.'); return; }
     const u = new SpeechSynthesisUtterance(text);
-    u.lang = $('lang').value;
+    u.lang = pick.lang;
+    if (pick.voice) u.voice = pick.voice;
     speechSynthesis.speak(u);
   }
 }
+
+// Pick a phone voice for the reply. Devanagari needs a Hindi voice; Hinglish/English text can use an English one.
+function phoneVoice(text, lang) {
+  const voices = speechSynthesis.getVoices();
+  const hindi = voices.find((v) => v.lang?.toLowerCase().startsWith('hi'));
+  const english = voices.find((v) => v.lang?.toLowerCase() === 'en-in') || voices.find((v) => v.lang?.toLowerCase().startsWith('en'));
+  const devanagari = /[\u0900-\u097F]/.test(text);
+  if (devanagari) return hindi ? { voice: hindi, lang: 'hi-IN' } : null;
+  if (lang === 'hi-IN' && hindi) return { voice: hindi, lang: 'hi-IN' };
+  return { voice: english || null, lang: 'en-IN' };
+}
+
 
 function describeCurrent() {
   const cur = current();

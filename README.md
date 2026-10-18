@@ -6,7 +6,7 @@
 
 **Live:** https://mydincharya.vercel.app
 
-A voice-first log of your day. Speak naturally, in English, Hindi, Hinglish or any Indian language, and Dincharya turns it into a timeline you can look back on, day by day.
+A voice-first log of your day. Speak naturally, in English, Hindi or Hinglish, and Dincharya turns it into a timeline you can look back on, day by day.
 
 ## What you can say
 
@@ -32,7 +32,7 @@ A voice-first log of your day. Speak naturally, in English, Hindi, Hinglish or a
 - **Summarise this day:** a short spoken review of your day with one suggestion for tomorrow.
 - **Edit anything, undo anything:** tap an activity to fix it, or undo the last change.
 - **Never lose your log:** saved instantly in the browser (works offline), and backed up to a Postgres database and synced across your phone and laptop with a passcode.
-- **Replies in 11 languages:** English, Hindi, Bengali, Marathi, Tamil, Telugu, Kannada, Malayalam, Gujarati, Punjabi, Odia.
+- **Hindi or English:** speak either or mix them; replies come back in the language you pick.
 
 ## Screenshots
 

@@ -13,15 +13,8 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 4 *
 
 const CATEGORIES = ['work', 'study', 'meal', 'break', 'exercise', 'sleep', 'commute', 'chores', 'social', 'leisure', 'personal', 'other'];
 
-// Languages Bulbul can speak (Saaras understands 22 Indian languages + English for input).
-const LANGUAGES = {
-  'hi-IN': { name: 'Hindi', script: 'Devanagari' }, 'en-IN': { name: 'English', script: 'Latin' },
-  'bn-IN': { name: 'Bengali', script: 'Bengali' }, 'ta-IN': { name: 'Tamil', script: 'Tamil' },
-  'te-IN': { name: 'Telugu', script: 'Telugu' }, 'kn-IN': { name: 'Kannada', script: 'Kannada' },
-  'ml-IN': { name: 'Malayalam', script: 'Malayalam' }, 'mr-IN': { name: 'Marathi', script: 'Devanagari' },
-  'gu-IN': { name: 'Gujarati', script: 'Gujarati' }, 'pa-IN': { name: 'Punjabi', script: 'Gurmukhi' },
-  'od-IN': { name: 'Odia', script: 'Odia' },
-};
+// The app works in Hindi and English only.
+const LANGUAGES = { 'hi-IN': { name: 'Hindi', script: 'Devanagari' }, 'en-IN': { name: 'English', script: 'Latin' } };
 const langCode = (l) => (LANGUAGES[l] ? l : 'en-IN');
 const replyIn = (code) => (code === 'en-IN' ? 'simple English' : `simple ${LANGUAGES[code].name}, written entirely in ${LANGUAGES[code].script} script`);
 
@@ -67,7 +60,7 @@ app.post('/api/transcribe', rateLimit, upload.single('audio'), async (req, res) 
 // the browser turns them into real timestamps, so date arithmetic never depends on the model.
 const mealAt = (min) => { const h = (((min % 1440) + 1440) % 1440) / 60; return h < 11 ? 'Breakfast' : h < 16 ? 'Lunch' : h < 19 ? 'Snacks' : 'Dinner'; };
 
-const UNDERSTAND_SYSTEM = (now, weekday, current, code) => `You turn what a person says about their day into activity records. They speak English, Hindi, Hinglish or any Indian language; the text may come from speech recognition and have small mistakes.
+const UNDERSTAND_SYSTEM = (now, weekday, current, code) => `You turn what a person says about their day into activity records. They speak English, Hindi or Hinglish; the text may come from speech recognition and have small mistakes.
 
 Current local date and time: ${now} (${weekday}).
 Current activity: ${current || 'none'}.
