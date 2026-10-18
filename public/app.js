@@ -1,0 +1,694 @@
+// Din: a voice-first log of your day.
+// Everything is saved in this browser first (instant, works offline) and synced to the server's
+// database when a passcode is set, so a refresh, a cleared browser or a new phone loses nothing.
+const KEYS = { entries: 'din.entries.v1', dirty: 'din.dirty.v1', cursor: 'din.cursor.v1', pass: 'din.passcode', lang: 'din.lang', voice: 'din.voice', alerts: 'din.alerts', resume: 'din.resume' };
+const MAX_SECONDS = 28; // Sarvam REST speech-to-text accepts up to 30 s
+const CATS = {
+  work: 'Work', study: 'Study', meal: 'Meal', break: 'Break', exercise: 'Exercise', sleep: 'Sleep',
+  commute: 'Commute', chores: 'Chores', social: 'Social', leisure: 'Leisure', personal: 'Personal', other: 'Other',
+};
+const MIN = 60 * 1000;
+
+const $ = (id) => document.getElementById(id);
+function el(tag, props = {}, ...kids) {
+  const node = Object.assign(document.createElement(tag), props);
+  for (const k of kids) if (k != null) node.append(k);
+  return node;
+}
+const store = {
+  get(k, fallback) { try { const v = localStorage.getItem(k); return v == null ? fallback : JSON.parse(v); } catch { return fallback; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* storage full or blocked */ } },
+};
+const newId = () => (crypto.randomUUID ? crypto.randomUUID() : 'id-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10));
+const catVar = (c) => `var(--c-${CATS[c] ? c : 'other'})`;
+
+// ---------- time helpers ----------
+const pad = (n) => String(n).padStart(2, '0');
+const dayKey = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const fromDayKey = (k) => { const [y, m, d] = k.split('-').map(Number); return new Date(y, m - 1, d); };
+const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+const atTime = (day, hhmm) => { const [h, m] = hhmm.split(':').map(Number); const x = new Date(day); x.setHours(h, m, 0, 0); return x; };
+const fmtTime = (d) => d.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' }).replace(' ', ' ');
+const hhmm = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+function fmtDur(ms) {
+  const m = Math.max(0, Math.round(ms / MIN));
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60), r = m % 60;
+  return r ? `${h}h ${r}m` : `${h}h`;
+}
+function fmtClock(ms) { // 12:05 / 1:02:09 countdowns
+  const s = Math.max(0, Math.round(ms / 1000));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return h ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`;
+}
+const localNow = () => { const d = new Date(); return `${dayKey(d)}T${hhmm(d)}`; };
+
+// ---------- data ----------
+let entries = store.get(KEYS.entries, []);
+if (!Array.isArray(entries)) entries = [];
+entries = entries.filter((e) => e && e.id && e.start && e.title);
+let dirty = new Set(store.get(KEYS.dirty, []));
+let selectedDay = dayKey(new Date());
+const live = () => entries.filter((e) => !e.deleted);
+
+function save() {
+  store.set(KEYS.entries, entries);
+  store.set(KEYS.dirty, [...dirty]);
+  scheduleSync();
+}
+function touch(e) { e.updatedAt = new Date().toISOString(); dirty.add(e.id); }
+
+// the activity happening now: started, and not yet ended
+function current(now = Date.now()) {
+  return live()
+    .filter((e) => new Date(e.start).getTime() <= now && (!e.end || new Date(e.end).getTime() > now))
+    .sort((a, b) => new Date(b.start) - new Date(a.start))[0] || null;
+}
+// the most recent planned activity that has just run out (for "Break is over" + "back to …")
+function justEnded(now = Date.now()) {
+  const e = live()
+    .filter((x) => x.planned && x.end && new Date(x.end).getTime() <= now && now - new Date(x.end).getTime() < 30 * MIN)
+    .sort((a, b) => new Date(b.end) - new Date(a.end))[0];
+  if (!e) return null;
+  // only if nothing has been logged since it ended (otherwise the user has moved on)
+  const after = live().some((x) => x.id !== e.id && new Date(x.start) >= new Date(e.end) && new Date(x.start).getTime() <= now);
+  return after ? null : e;
+}
+
+// ---------- undo: every change records what it touched ----------
+let lastChange = null;
+function beginChange() { return { before: new Map(), created: [] }; }
+function remember(change, e) { if (!change.before.has(e.id)) change.before.set(e.id, { ...e }); }
+function commitChange(change, message) {
+  save(); render();
+  lastChange = change;
+  toast(message, () => undoChange(change));
+}
+function undoChange(change) {
+  for (const id of change.created) {
+    const e = entries.find((x) => x.id === id);
+    if (e) { e.deleted = true; touch(e); }
+  }
+  for (const [id, old] of change.before) {
+    const i = entries.findIndex((x) => x.id === id);
+    if (i >= 0) { entries[i] = { ...old }; touch(entries[i]); }
+  }
+  lastChange = null;
+  save(); render();
+  toast('Undone.');
+}
+
+// ---------- turning what the model understood into entries ----------
+function resolveStart(spec, now) {
+  if (spec.type === 'ago') return new Date(now.getTime() - spec.minutes * MIN);
+  if (spec.type === 'at') return atTime(spec.day === 'yesterday' ? addDays(now, -1) : now, spec.time);
+  return new Date(now);
+}
+function resolveEnd(spec, start, now) {
+  if (spec.type === 'duration') return new Date(start.getTime() + spec.minutes * MIN);
+  if (spec.type === 'now') return new Date(now);
+  if (spec.type === 'at') {
+    let end = atTime(start, spec.time);
+    // ran past midnight (sleep 23:00 → 07:00); only evening starts wrap, anything else is a bad end time
+    if (end <= start && start.getHours() >= 17 && addDays(end, 1) - start <= 16 * 60 * MIN) end = addDays(end, 1);
+    return end;
+  }
+  return null; // open: ends when the next thing starts
+}
+
+function applyUnderstanding(data) {
+  const now = new Date();
+  const change = beginChange();
+  const cur = current(now.getTime());
+
+  if (data.action === 'stop') {
+    if (!cur) return { ok: false, message: 'Nothing is running right now.' };
+    remember(change, cur);
+    cur.end = now.toISOString();
+    cur.planned = false;
+    touch(cur);
+    commitChange(change, `Stopped ${cur.title}.`);
+    return { ok: true };
+  }
+
+  const made = [];
+  for (const a of data.activities) {
+    let start = resolveStart(a.start, now);
+    let end = resolveEnd(a.end, start, now);
+    // "gym 7 se 8, phir 8:30 tak nashta": a chained activity starts where the previous one ended
+    const prev = made[made.length - 1];
+    if (end && end <= start && prev?.end && new Date(prev.end) < end) start = new Date(prev.end);
+    if (end && end <= start) end = new Date(start.getTime() + 30 * MIN); // still nonsense: assume half an hour, editable
+    // a finished activity can't start in the future: "11 se 7 tak soyi" said at 1 pm means last night
+    if (data.action === 'log' && start > now) {
+      start = addDays(start, -1);
+      if (end) end = addDays(end, -1);
+    }
+    const e = {
+      id: newId(), title: a.title, category: a.category, start: start.toISOString(), end: end ? end.toISOString() : null,
+      note: a.note || '', deleted: false, planned: !!end && end > now,
+    };
+    touch(e);
+    made.push(e);
+  }
+
+  // in a list of past activities, one left open ends where the next one starts
+  if (data.action === 'log') {
+    made.sort((x, y) => new Date(x.start) - new Date(y.start));
+    made.forEach((e, i) => { if (!e.end && made[i + 1]) e.end = made[i + 1].start; });
+  }
+
+  // whatever covers "now" becomes the current activity and ends the one before it
+  const running = made.find((e) => new Date(e.start) <= now && (!e.end || new Date(e.end) > now));
+  if (running && cur && new Date(cur.start) < new Date(running.start)) {
+    remember(change, cur);
+    if (!cur.end || new Date(cur.end) > new Date(running.start)) {
+      // remember what a break/meal interrupted, to offer "Back to …" afterwards
+      if (['break', 'meal'].includes(running.category) && !['break', 'meal'].includes(cur.category)) {
+        store.set(KEYS.resume, { title: cur.title, category: cur.category, after: running.id });
+      }
+      cur.end = running.start;
+      cur.planned = false;
+      if (new Date(running.start) - new Date(cur.start) < MIN) cur.deleted = true; // switched within a minute: a slip, not an activity
+      touch(cur);
+    }
+  }
+
+  entries.push(...made);
+  change.created.push(...made.map((e) => e.id));
+  // jump to the day of what was just logged
+  selectedDay = dayKey(new Date(made[0].start));
+  const msg = made.length === 1 ? `Logged ${made[0].title}${made[0].end ? ` · ${fmtTime(new Date(made[0].start))}–${fmtTime(new Date(made[0].end))}` : ` from ${fmtTime(new Date(made[0].start))}`}.` : `Logged ${made.length} activities.`;
+  commitChange(change, msg);
+  if (made.some((e) => e.planned)) maybeAskAlertPermission();
+  return { ok: true };
+}
+
+// quick actions from the Now card, no AI needed
+function startQuick(title, category, minutes) {
+  applyUnderstanding({ action: 'start', activities: [{ title, category, start: { type: 'now' }, end: minutes ? { type: 'duration', minutes } : { type: 'open' }, note: '' }] });
+}
+function extend(e, minutes) {
+  const change = beginChange();
+  remember(change, e);
+  const base = Math.max(Date.now(), new Date(e.end).getTime());
+  e.end = new Date(base + minutes * MIN).toISOString();
+  e.planned = true;
+  touch(e);
+  commitChange(change, `${e.title} extended to ${fmtTime(new Date(e.end))}.`);
+}
+
+// ---------- API ----------
+async function api(path, options = {}) {
+  let res;
+  try { res = await fetch(path, options); }
+  catch { throw Object.assign(new Error('You seem to be offline.'), { offline: true }); }
+  let data = {};
+  try { data = await res.json(); } catch { /* not JSON */ }
+  if (!res.ok) throw Object.assign(new Error(data.error || `Request failed (${res.status})`), { status: res.status });
+  return data;
+}
+
+function setReply(msg, isError = false) { $('reply').textContent = msg; $('reply').classList.toggle('error', isError); }
+function busy(btn, on) { btn.disabled = on; btn.classList.toggle('is-busy', on); }
+
+let replyAudio = null;
+function play(b64) {
+  if (!b64 || !$('voice').checked) return;
+  replyAudio?.pause();
+  replyAudio = new Audio('data:audio/mpeg;base64,' + b64);
+  replyAudio.play().catch(() => { /* autoplay blocked */ });
+}
+
+function describeCurrent() {
+  const cur = current();
+  if (!cur) return '';
+  const s = new Date(cur.start);
+  return `${cur.title} (${cur.category}) since ${hhmm(s)}${cur.end ? `, planned until ${hhmm(new Date(cur.end))}` : ''}`;
+}
+
+async function understand(text) {
+  text = text.trim();
+  if (!text) { setReply('Say or type what you are doing.', true); return; }
+  busy($('say-go'), true);
+  setReply('Got it, writing it down…');
+  try {
+    const data = await api('/api/understand', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text, now: localNow(), weekday: new Date().toLocaleDateString('en-IN', { weekday: 'long' }),
+        current: describeCurrent(), language_code: $('lang').value, speak: $('voice').checked,
+      }),
+    });
+    if (data.action === 'unclear') { setReply(data.reply || 'Try: “taking a 15 minute break”.', true); play(data.audio); return; }
+    const result = applyUnderstanding(data);
+    if (!result.ok) { setReply(result.message, true); return; }
+    setReply(data.reply || '');
+    play(data.audio);
+    $('say-text').value = '';
+  } catch (e) {
+    setReply(e.offline ? 'You are offline, so I can’t understand speech or sentences right now. Use the quick buttons or “Add manually”.' : e.message, true);
+  } finally {
+    busy($('say-go'), false);
+  }
+}
+
+$('say-form').onsubmit = (ev) => { ev.preventDefault(); understand($('say-text').value); };
+document.querySelectorAll('.chip').forEach((c) => { c.onclick = () => understand(c.dataset.text); });
+
+// ---------- recording ----------
+let recorder = null, chunks = [], micStream = null, micTick = null;
+function pickMime() {
+  const options = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
+  return options.find((m) => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || '';
+}
+async function startRecording() {
+  if (!navigator.mediaDevices || !window.MediaRecorder) { setReply('This browser cannot record audio. Type instead.', true); return; }
+  try { micStream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  catch { setReply('Microphone blocked. Allow mic access, or type instead.', true); return; }
+  chunks = [];
+  const mimeType = pickMime();
+  recorder = new MediaRecorder(micStream, mimeType ? { mimeType } : undefined);
+  recorder.ondataavailable = (ev) => { if (ev.data.size) chunks.push(ev.data); };
+  recorder.onstop = onRecorded;
+  recorder.start();
+  const started = Date.now();
+  $('mic').setAttribute('aria-pressed', 'true');
+  setReply('Listening… tap the mic again when done.');
+  micTick = setInterval(() => { if (Date.now() - started > MAX_SECONDS * 1000) stopRecording(); }, 250);
+}
+function stopRecording() {
+  clearInterval(micTick);
+  if (recorder && recorder.state !== 'inactive') recorder.stop();
+  micStream?.getTracks().forEach((t) => t.stop());
+  $('mic').setAttribute('aria-pressed', 'false');
+}
+async function onRecorded() {
+  const type = recorder.mimeType || 'audio/webm';
+  const blob = new Blob(chunks, { type });
+  if (blob.size < 1500) { setReply('That was too short. Tap, speak, then tap again.', true); return; }
+  const form = new FormData();
+  form.append('audio', blob, `speech.${type.includes('mp4') ? 'm4a' : type.includes('ogg') ? 'ogg' : 'webm'}`);
+  $('mic').disabled = true;
+  setReply('Listening to that…');
+  try {
+    const { transcript } = await api('/api/transcribe', { method: 'POST', body: form });
+    $('say-text').value = transcript;
+    await understand(transcript);
+  } catch (e) {
+    setReply(e.offline ? 'You are offline. Type instead or use the quick buttons.' : e.message, true);
+  } finally {
+    $('mic').disabled = false;
+  }
+}
+$('mic').onclick = () => (recorder && recorder.state === 'recording' ? stopRecording() : startRecording());
+
+// ---------- Now card ----------
+let alerted = new Set();
+function renderNow() {
+  const box = $('now-body');
+  const card = $('now');
+  const now = Date.now();
+  const cur = current(now);
+  box.replaceChildren();
+  card.classList.remove('overdue');
+
+  if (cur) {
+    card.style.setProperty('--c', catVar(cur.category));
+    const start = new Date(cur.start).getTime();
+    box.append(el('p', { className: 'now-title' }, cur.title, el('span', { className: 'cat', textContent: CATS[cur.category] || 'Other' })));
+    const actions = el('div', { className: 'now-actions' });
+    if (cur.end) {
+      const end = new Date(cur.end).getTime();
+      const left = end - now;
+      box.append(el('p', { className: 'now-meta' }, `${fmtTime(new Date(start))} – ${fmtTime(new Date(end))} · `, el('b', { textContent: fmtClock(left) }), ' left'));
+      const bar = el('div', { className: 'bar' }, el('span'));
+      bar.firstChild.style.width = `${Math.min(100, ((now - start) / (end - start)) * 100)}%`;
+      box.append(bar);
+      actions.append(button('+10 min', () => extend(cur, 10)));
+    } else {
+      box.append(el('p', { className: 'now-meta' }, `Since ${fmtTime(new Date(start))} · `, el('b', { textContent: fmtClock(now - start) })));
+      if (now - start > 4 * 60 * MIN) box.append(el('p', { className: 'hint tight', textContent: 'Running for a long time. Forgot to stop it?' }));
+    }
+    actions.append(button('Done', () => applyUnderstanding({ action: 'stop', activities: [] }), 'primary'));
+    if (!['break', 'meal'].includes(cur.category)) actions.append(button('Break 15m', () => startQuick('Break', 'break', 15)));
+    box.append(actions);
+    return;
+  }
+
+  const ended = justEnded(now);
+  if (ended) {
+    card.style.setProperty('--c', catVar(ended.category));
+    card.classList.add('overdue');
+    box.append(el('p', { className: 'now-title', textContent: `${ended.title} is over` }));
+    box.append(el('p', { className: 'now-meta' }, `Ended ${fmtDur(now - new Date(ended.end).getTime())} ago at ${fmtTime(new Date(ended.end))}.`));
+    const actions = el('div', { className: 'now-actions' });
+    const resume = store.get(KEYS.resume, null);
+    if (resume && resume.after === ended.id) {
+      actions.append(button(`Back to ${resume.title}`, () => { store.set(KEYS.resume, null); startQuick(resume.title, resume.category, 0); }, 'primary'));
+    }
+    actions.append(button('+10 min', () => extend(ended, 10)));
+    box.append(actions);
+    return;
+  }
+
+  card.style.setProperty('--c', 'var(--line)');
+  box.append(el('p', { className: 'now-idle', textContent: 'Nothing running. What are you doing?' }));
+}
+function button(label, onClick, cls = '') {
+  const b = el('button', { className: 'btn ' + cls, type: 'button', textContent: label });
+  b.onclick = onClick;
+  return b;
+}
+
+// when a planned activity runs out: sound + (optional) system notification, once
+function checkAlerts() {
+  const e = justEnded();
+  if (!e || alerted.has(e.id) || Date.now() - new Date(e.end).getTime() > 2 * MIN) return;
+  alerted.add(e.id);
+  chime();
+  if ($('alerts').checked && 'Notification' in window && Notification.permission === 'granted') {
+    try { new Notification(`${e.title} is over`, { body: 'Tap to log what you do next.', tag: e.id }); } catch { /* some mobile browsers need a service worker */ }
+  }
+}
+function chime() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    [660, 880].forEach((f, i) => {
+      const o = ctx.createOscillator(), g = ctx.createGain(), t = ctx.currentTime + i * 0.25;
+      o.frequency.value = f; g.gain.setValueAtTime(0.12, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.35);
+      o.connect(g).connect(ctx.destination); o.start(t); o.stop(t + 0.4);
+    });
+    setTimeout(() => ctx.close(), 1200);
+  } catch { /* no sound */ }
+}
+function maybeAskAlertPermission() {
+  if (!$('alerts').checked || !('Notification' in window) || Notification.permission !== 'default') return;
+  Notification.requestPermission().catch(() => {});
+}
+
+// ---------- day view ----------
+function dayBounds(key) { const s = fromDayKey(key); return [s.getTime(), addDays(s, 1).getTime()]; }
+function entriesOn(key) {
+  const [s, e] = dayBounds(key);
+  const now = Date.now();
+  return live()
+    .filter((x) => new Date(x.start).getTime() < e && (x.end ? new Date(x.end).getTime() : Math.max(now, new Date(x.start).getTime())) > s)
+    .sort((a, b) => new Date(a.start) - new Date(b.start));
+}
+
+function renderDay() {
+  const today = dayKey(new Date());
+  const d = fromDayKey(selectedDay);
+  const label = selectedDay === today ? 'Today' : selectedDay === dayKey(addDays(new Date(), -1)) ? 'Yesterday' : d.toLocaleDateString('en-IN', { weekday: 'long' });
+  $('day-h').textContent = label;
+  $('date-pick').value = selectedDay;
+  $('date-pick').max = today;
+  $('next-day').disabled = selectedDay >= today;
+
+  const list = entriesOn(selectedDay);
+  const [ds, de] = dayBounds(selectedDay);
+  const now = Date.now();
+  const clip = (x) => {
+    const s = Math.max(ds, new Date(x.start).getTime());
+    const e = Math.min(de, x.end ? new Date(x.end).getTime() : now);
+    return Math.max(0, Math.min(e, now) - s); // time not yet happened doesn't count
+  };
+
+  // totals per category
+  const totals = new Map();
+  for (const x of list) totals.set(x.category, (totals.get(x.category) || 0) + clip(x));
+  const sorted = [...totals].filter(([, ms]) => ms > 0).sort((a, b) => b[1] - a[1]);
+  const all = sorted.reduce((s, [, ms]) => s + ms, 0);
+  const tbox = $('totals');
+  tbox.replaceChildren();
+  if (all > 0) {
+    const stack = el('div', { className: 'stack', title: 'Time by type' });
+    const legend = el('div', { className: 'legend' });
+    for (const [cat, ms] of sorted) {
+      const seg = el('span');
+      seg.style.setProperty('--c', catVar(cat));
+      seg.style.flex = String(ms);
+      stack.append(seg);
+      const item = el('span', {}, el('i'), CATS[cat] || 'Other', ' ', el('b', { textContent: fmtDur(ms) }));
+      item.style.setProperty('--c', catVar(cat));
+      legend.append(item);
+    }
+    tbox.append(stack, legend, el('div', { className: 'tracked', textContent: `${fmtDur(all)} logged` }));
+  }
+
+  // timeline
+  const ol = $('timeline');
+  ol.replaceChildren();
+  let prevEnd = null;
+  for (const x of list) {
+    const s = new Date(x.start), e = x.end ? new Date(x.end) : null;
+    const running = s.getTime() <= now && (!e || e.getTime() > now);
+    if (prevEnd && s.getTime() - prevEnd > 15 * MIN && s.getTime() > ds) {
+      ol.append(el('li', { className: 't-item' }, el('span'), el('div', { className: 't-gap', textContent: `not logged · ${fmtDur(s.getTime() - prevEnd)}` })));
+    }
+    const card = el('button', { className: 't-card', type: 'button', title: 'Edit' });
+    card.style.setProperty('--c', catVar(x.category));
+    card.append(
+      el('div', { className: 't-head' }, el('span', { className: 't-title', textContent: x.title }),
+        el('span', { className: 't-dur', textContent: e ? fmtDur(e - s) : fmtDur(now - s) })),
+      el('div', { className: 't-sub' },
+        el('span', { className: 'cat', textContent: CATS[x.category] || 'Other' }),
+        running ? el('span', { className: 't-live', textContent: '● now' }) : null,
+        x.note ? el('span', { textContent: x.note }) : null),
+    );
+    card.style.setProperty('--c', catVar(x.category));
+    card.querySelector('.cat').style.setProperty('--c', catVar(x.category));
+    card.onclick = () => openEdit(x);
+    const time = el('div', { className: 't-time' }, el('b', { textContent: fmtTime(s) }), e ? `to ${fmtTime(e)}` : running ? 'now' : '');
+    ol.append(el('li', { className: 't-item' }, time, card));
+    prevEnd = Math.max(prevEnd || 0, e ? e.getTime() : now);
+  }
+  $('day-empty').hidden = list.length > 0;
+  $('summary-box').hidden = $('summary-box').dataset.day !== selectedDay;
+}
+
+// numbers for the AI summary, computed here so the model never has to do arithmetic
+function dayFacts(key) {
+  const [ds, de] = dayBounds(key);
+  const now = Date.now();
+  const list = entriesOn(key);
+  const spans = list.map((x) => ({ x, s: Math.max(ds, new Date(x.start).getTime()), e: Math.min(de, now, x.end ? new Date(x.end).getTime() : now) })).filter((p) => p.e > p.s);
+  const by = new Map();
+  for (const p of spans) by.set(p.x.category, (by.get(p.x.category) || 0) + (p.e - p.s));
+  const total = [...by.values()].reduce((s, v) => s + v, 0);
+  let gap = 0, gapAt = '';
+  for (let i = 1; i < spans.length; i++) {
+    const g = spans[i].s - Math.max(...spans.slice(0, i).map((p) => p.e));
+    if (g > gap) { gap = g; gapAt = `${fmtTime(new Date(spans[i].s - g))}–${fmtTime(new Date(spans[i].s))}`; }
+  }
+  const longest = spans.reduce((m, p) => (p.e - p.s > (m ? m.e - m.s : 0) ? p : m), null);
+  return [
+    `Time by type (within this day): ${[...by].sort((a, b) => b[1] - a[1]).map(([c, ms]) => `${CATS[c] || c} ${fmtDur(ms)}`).join(', ')}`,
+    `Total logged: ${fmtDur(total)}`,
+    `Focused (work + study): ${fmtDur((by.get('work') || 0) + (by.get('study') || 0))}`,
+    `Meals and breaks together: ${fmtDur((by.get('meal') || 0) + (by.get('break') || 0))}`,
+    `Exercise: ${fmtDur(by.get('exercise') || 0)}`,
+    `Sleep (within this day): ${fmtDur(by.get('sleep') || 0)}`,
+    longest ? `Longest single activity: ${longest.x.title}, ${fmtDur(longest.e - longest.s)}` : '',
+    gap >= 30 * MIN ? `Longest stretch with nothing logged: ${fmtDur(gap)} (${gapAt})` : 'No long unlogged gaps',
+  ].filter(Boolean).join('\n');
+}
+
+function render() { renderNow(); renderDay(); }
+
+$('prev-day').onclick = () => { selectedDay = dayKey(addDays(fromDayKey(selectedDay), -1)); renderDay(); };
+$('next-day').onclick = () => { selectedDay = dayKey(addDays(fromDayKey(selectedDay), 1)); renderDay(); };
+$('date-pick').onchange = () => { if ($('date-pick').value) { selectedDay = $('date-pick').value; renderDay(); } };
+
+// ---------- add / edit ----------
+let editing = null;
+for (const [v, label] of Object.entries(CATS)) $('e-cat').append(el('option', { value: v, textContent: label }));
+
+function openEdit(entry) {
+  editing = entry || null;
+  $('edit-title').textContent = entry ? 'Edit activity' : 'Add activity';
+  $('e-delete').hidden = !entry;
+  $('edit-error').hidden = true;
+  const s = entry ? new Date(entry.start) : atTime(fromDayKey(selectedDay), hhmm(new Date()));
+  $('e-title').value = entry?.title || '';
+  $('e-cat').value = entry?.category || 'work';
+  $('e-date').value = dayKey(s);
+  $('e-start').value = hhmm(s);
+  $('e-end').value = entry?.end ? hhmm(new Date(entry.end)) : '';
+  $('e-note').value = entry?.note || '';
+  $('edit').showModal();
+}
+$('add-btn').onclick = () => openEdit(null);
+$('e-cancel').onclick = () => $('edit').close();
+$('edit-form').onsubmit = (ev) => {
+  ev.preventDefault();
+  const title = $('e-title').value.trim();
+  if (!title || !$('e-date').value || !$('e-start').value) return;
+  const start = atTime(fromDayKey($('e-date').value), $('e-start').value);
+  let end = $('e-end').value ? atTime(start, $('e-end').value) : null;
+  if (end && end <= start) end = addDays(end, 1);
+  if (!end && start > new Date()) { $('edit-error').textContent = 'A future activity needs an end time.'; $('edit-error').hidden = false; return; }
+  const change = beginChange();
+  let e = editing;
+  if (e) remember(change, e);
+  else { e = { id: newId(), deleted: false }; entries.push(e); change.created.push(e.id); }
+  Object.assign(e, { title, category: $('e-cat').value, start: start.toISOString(), end: end ? end.toISOString() : null, note: $('e-note').value.trim(), planned: !!end && end > new Date() });
+  touch(e);
+  $('edit').close();
+  selectedDay = dayKey(start);
+  commitChange(change, editing ? 'Saved.' : `Added ${title}.`);
+};
+$('e-delete').onclick = () => {
+  if (!editing) return;
+  const change = beginChange();
+  remember(change, editing);
+  editing.deleted = true;
+  touch(editing);
+  $('edit').close();
+  commitChange(change, `Deleted ${editing.title}.`);
+};
+
+// ---------- spoken day summary ----------
+$('summary-btn').onclick = async () => {
+  const list = entriesOn(selectedDay);
+  if (!list.length) { toast('Nothing logged on this day yet.'); return; }
+  const lines = list.map((x) => `${fmtTime(new Date(x.start))}–${x.end ? fmtTime(new Date(x.end)) : 'now'} ${x.title} (${x.category})${x.note ? ' – ' + x.note : ''}`);
+  const totals = dayFacts(selectedDay);
+  busy($('summary-btn'), true);
+  try {
+    const data = await api('/api/summary', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date: fromDayKey(selectedDay).toDateString(), lines, totals, language_code: $('lang').value }),
+    });
+    $('summary-text').textContent = data.summary;
+    const audio = $('summary-audio');
+    audio.hidden = !data.audio;
+    if (data.audio) { audio.src = 'data:audio/mpeg;base64,' + data.audio; if ($('voice').checked) audio.play().catch(() => {}); }
+    $('summary-box').dataset.day = selectedDay;
+    $('summary-box').hidden = false;
+  } catch (e) {
+    toast(e.offline ? 'You are offline. Summaries need the internet.' : e.message);
+  } finally {
+    busy($('summary-btn'), false);
+  }
+};
+
+// ---------- sync with the server database ----------
+let cloud = false, syncTimer = null, syncing = false, syncAgain = false;
+function syncState(state, text) { $('sync').dataset.state = state; $('sync-text').textContent = text; }
+const passcode = () => store.get(KEYS.pass, '');
+
+function scheduleSync() { clearTimeout(syncTimer); syncTimer = setTimeout(syncNow, 600); }
+
+async function syncNow() {
+  if (!cloud) { syncState('local', 'This device only'); return; }
+  if (!passcode()) { syncState('local', 'Set up sync'); return; }
+  if (!navigator.onLine) { syncState('offline', 'Offline · saved here'); return; }
+  if (syncing) { syncAgain = true; return; }
+  syncing = true;
+  syncState('saving', 'Syncing…');
+  const headers = { 'Content-Type': 'application/json', 'x-din-passcode': passcode() };
+  try {
+    // push local changes
+    const ids = [...dirty];
+    if (ids.length) {
+      const batch = entries.filter((e) => dirty.has(e.id)).map(({ id, title, category, start, end, note, deleted, updatedAt }) => ({ id, title, category, start, end, note, deleted, updatedAt }));
+      await api('/api/entries', { method: 'POST', headers, body: JSON.stringify({ entries: batch }) });
+      ids.forEach((id) => dirty.delete(id));
+    }
+    // pull what changed elsewhere
+    const cursor = store.get(KEYS.cursor, null);
+    const data = await api('/api/entries' + (cursor ? `?since=${encodeURIComponent(cursor)}` : ''), { headers });
+    let changed = false;
+    for (const remote of data.entries) {
+      const i = entries.findIndex((e) => e.id === remote.id);
+      if (i < 0) { entries.push({ ...remote, planned: !!remote.end && new Date(remote.end) > new Date() }); changed = true; continue; }
+      const local = entries[i];
+      if (new Date(remote.updatedAt) > new Date(local.updatedAt) && !dirty.has(local.id)) {
+        entries[i] = { ...local, ...remote };
+        changed = true;
+      }
+    }
+    if (data.cursor) store.set(KEYS.cursor, data.cursor);
+    store.set(KEYS.entries, entries);
+    store.set(KEYS.dirty, [...dirty]);
+    if (changed) render();
+    syncState('synced', 'Synced');
+    $('pass-status').textContent = 'Connected. Your log is backed up and syncs across devices.';
+  } catch (e) {
+    if (e.status === 401) { syncState('error', 'Wrong passcode'); $('pass-status').textContent = 'That passcode is wrong.'; }
+    else if (e.offline) syncState('offline', 'Offline · saved here');
+    else syncState('error', 'Sync failed');
+  } finally {
+    syncing = false;
+    store.set(KEYS.dirty, [...dirty]);
+    if (syncAgain) { syncAgain = false; scheduleSync(); }
+  }
+}
+
+async function initSync() {
+  try { cloud = !!(await api('/api/sync/status')).cloud; } catch { cloud = false; }
+  $('sync-help').textContent = cloud
+    ? 'Enter the passcode once on each device. Your log is then backed up online and the same on your phone and laptop.'
+    : 'Cloud sync is not set up on this server, so your log is saved only in this browser. Download a copy now and then.';
+  $('pass-field').hidden = !cloud;
+  syncNow();
+}
+window.addEventListener('online', scheduleSync);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { render(); syncNow(); } });
+setInterval(syncNow, 60 * 1000);
+
+// ---------- settings ----------
+$('lang').value = store.get(KEYS.lang, 'en-IN');
+$('voice').checked = store.get(KEYS.voice, true);
+$('alerts').checked = store.get(KEYS.alerts, false);
+$('passcode').value = passcode();
+$('settings-btn').onclick = () => $('settings').showModal();
+$('sync').onclick = () => $('settings').showModal();
+$('settings-save').onclick = () => {
+  store.set(KEYS.lang, $('lang').value);
+  store.set(KEYS.voice, $('voice').checked);
+  store.set(KEYS.alerts, $('alerts').checked);
+  const p = $('passcode').value.trim();
+  if (p !== passcode()) {
+    store.set(KEYS.pass, p);
+    store.set(KEYS.cursor, null); // new passcode: pull everything again
+    entries.forEach((e) => dirty.add(e.id)); // and push everything this device has
+    store.set(KEYS.dirty, [...dirty]);
+  }
+  if ($('alerts').checked && 'Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {});
+  $('settings').close();
+  syncNow();
+};
+$('export-btn').onclick = () => {
+  const blob = new Blob([JSON.stringify(live(), null, 2)], { type: 'application/json' });
+  const a = el('a', { href: URL.createObjectURL(blob), download: `din-log-${dayKey(new Date())}.json` });
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+};
+
+// ---------- toast ----------
+let toastTimer = null;
+function toast(msg, undo) {
+  clearTimeout(toastTimer);
+  $('toast-text').textContent = msg;
+  $('toast-undo').hidden = !undo;
+  $('toast-undo').onclick = () => { $('toast').hidden = true; undo(); };
+  $('toast').hidden = false;
+  toastTimer = setTimeout(() => { $('toast').hidden = true; }, undo ? 6000 : 3000);
+}
+
+// ---------- start ----------
+render();
+initSync();
+let lastMinute = new Date().getMinutes();
+setInterval(() => {
+  renderNow();
+  checkAlerts();
+  const m = new Date().getMinutes();
+  if (m !== lastMinute) { lastMinute = m; renderDay(); } // durations tick on the timeline once a minute
+  if (selectedDay !== dayKey(new Date()) && selectedDay === dayKey(addDays(new Date(), -1)) && new Date().getHours() === 0 && new Date().getMinutes() === 0) {
+    selectedDay = dayKey(new Date()); renderDay(); // roll over at midnight
+  }
+}, 1000);

@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Din – log your day by voice</title>
+  <meta name="description" content="Say what you're doing, Din records when. A voice-first daily log in English, Hindi or any Indian language. Built with Sarvam AI.">
+  <meta name="theme-color" content="#1d2b3a">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Mukta:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Crect width=%2232%22 height=%2232%22 rx=%228%22 fill=%22%231d2b3a%22/%3E%3Ccircle cx=%2216%22 cy=%2216%22 r=%229%22 fill=%22none%22 stroke=%22%23f2b544%22 stroke-width=%223%22/%3E%3Cpath d=%22M16 10v6l4 3%22 stroke=%22%23f2b544%22 stroke-width=%223%22 fill=%22none%22 stroke-linecap=%22round%22/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="top-inner">
+      <div class="brand">
+        <h1>Din <span>दिन</span></h1>
+        <p>Say what you're doing. Din records when.</p>
+      </div>
+      <div class="top-tools">
+        <button id="sync" class="sync" type="button" data-state="local" title="Backup and sync">
+          <span class="sync-dot" aria-hidden="true"></span><span id="sync-text">This device only</span>
+        </button>
+        <button id="settings-btn" class="icon-btn" type="button" aria-label="Settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.4 13a7.5 7.5 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.4 7.4 0 0 0-1.7-1L15 3.3h-4L10.7 6a7.4 7.4 0 0 0-1.7 1l-2.5-1-2 3.5L6.6 11a7.5 7.5 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1a7.4 7.4 0 0 0 1.7 1l.3 2.6h4l.3-2.6a7.4 7.4 0 0 0 1.7-1l2.5 1 2-3.5L19.4 13ZM13 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Z" transform="translate(-1 0)"/></svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <!-- what is happening right now -->
+    <section id="now" class="card now" aria-live="polite">
+      <div class="now-label">Right now</div>
+      <div id="now-body"></div>
+    </section>
+
+    <!-- say or type what you're doing -->
+    <section class="card say" aria-labelledby="say-h">
+      <h2 id="say-h" class="sr">Log an activity</h2>
+      <div class="say-row">
+        <button id="mic" class="mic" type="button" aria-pressed="false" aria-label="Tap and say what you are doing">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-2.08A7 7 0 0 0 19 12h-2Z"/></svg>
+        </button>
+        <form id="say-form" class="say-form">
+          <label for="say-text" class="sr">What are you doing?</label>
+          <input id="say-text" type="text" autocomplete="off" placeholder="“Taking a break for 30 min” · “2 se 5 tak DSA kiya”">
+          <button id="say-go" class="btn primary" type="submit">Log</button>
+        </form>
+      </div>
+      <p id="mic-hint" class="hint">Tap the mic and speak, in English, Hindi or a mix. Tap again when done.</p>
+      <div class="chips" aria-label="Quick log">
+        <button class="chip" type="button" data-text="taking a break for 15 minutes">Break 15m</button>
+        <button class="chip" type="button" data-text="having lunch">Lunch</button>
+        <button class="chip" type="button" data-text="starting to study">Study</button>
+        <button class="chip" type="button" data-text="starting work">Work</button>
+        <button class="chip" type="button" data-text="going to the gym for an hour">Gym 1h</button>
+        <button class="chip" type="button" data-text="done">Done</button>
+      </div>
+      <p id="reply" class="reply" role="status" aria-live="polite"></p>
+    </section>
+
+    <!-- the selected day -->
+    <section class="card day" aria-labelledby="day-h">
+      <div class="day-nav">
+        <button id="prev-day" class="icon-btn soft" type="button" aria-label="Previous day">‹</button>
+        <div class="day-title">
+          <h2 id="day-h">Today</h2>
+          <label class="date-jump"><span class="sr">Go to date</span><input id="date-pick" type="date"></label>
+        </div>
+        <button id="next-day" class="icon-btn soft" type="button" aria-label="Next day">›</button>
+      </div>
+
+      <div id="totals" class="totals"></div>
+
+      <ol id="timeline" class="timeline"></ol>
+      <div id="day-empty" class="empty" hidden>
+        <p>Nothing logged on this day.</p>
+      </div>
+
+      <div class="day-tools">
+        <button id="add-btn" class="btn" type="button">+ Add manually</button>
+        <button id="summary-btn" class="btn" type="button">Summarise this day</button>
+      </div>
+      <div id="summary-box" class="summary" hidden>
+        <p id="summary-text"></p>
+        <audio id="summary-audio" controls></audio>
+      </div>
+    </section>
+
+    <footer class="foot">Din uses Sarvam AI: Saaras (speech), Sarvam 105B (understanding and summaries), Bulbul (voice).</footer>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden>
+    <span id="toast-text"></span>
+    <button id="toast-undo" type="button" hidden>Undo</button>
+  </div>
+
+  <!-- add / edit an activity -->
+  <dialog id="edit">
+    <form id="edit-form" method="dialog" class="dlg">
+      <h3 id="edit-title">Edit activity</h3>
+      <label class="field">What
+        <input id="e-title" required maxlength="60" placeholder="e.g. DSA practice">
+      </label>
+      <label class="field">Type
+        <select id="e-cat"></select>
+      </label>
+      <div class="field-row">
+        <label class="field">Date <input id="e-date" type="date" required></label>
+        <label class="field">From <input id="e-start" type="time" required></label>
+        <label class="field">To <input id="e-end" type="time"></label>
+      </div>
+      <p class="hint tight">Leave “To” empty if it is still going. An end time earlier than the start means it ran past midnight.</p>
+      <label class="field">Note <input id="e-note" maxlength="200" placeholder="optional"></label>
+      <p id="edit-error" class="error" hidden></p>
+      <div class="dlg-actions">
+        <button id="e-delete" type="button" class="btn danger">Delete</button>
+        <span class="grow"></span>
+        <button type="button" class="btn" id="e-cancel">Cancel</button>
+        <button type="submit" class="btn primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- settings -->
+  <dialog id="settings">
+    <form method="dialog" class="dlg">
+      <h3>Settings</h3>
+      <label class="field">Reply language
+        <select id="lang">
+          <option value="en-IN">English</option>
+          <option value="hi-IN">हिन्दी · Hindi</option>
+          <option value="bn-IN">বাংলা · Bengali</option>
+          <option value="mr-IN">मराठी · Marathi</option>
+          <option value="ta-IN">தமிழ் · Tamil</option>
+          <option value="te-IN">తెలుగు · Telugu</option>
+          <option value="kn-IN">ಕನ್ನಡ · Kannada</option>
+          <option value="ml-IN">മലയാളം · Malayalam</option>
+          <option value="gu-IN">ગુજરાતી · Gujarati</option>
+          <option value="pa-IN">ਪੰਜਾਬੀ · Punjabi</option>
+          <option value="od-IN">ଓଡ଼ିଆ · Odia</option>
+        </select>
+      </label>
+      <label class="check"><input id="voice" type="checkbox" checked> Speak replies out loud</label>
+      <label class="check"><input id="alerts" type="checkbox"> Alert me when a timed activity ends</label>
+
+      <h4>Backup and sync</h4>
+      <p id="sync-help" class="hint tight"></p>
+      <label class="field" id="pass-field">Passcode
+        <input id="passcode" type="password" autocomplete="current-password" placeholder="the passcode set on the server">
+      </label>
+      <p id="pass-status" class="hint tight" role="status"></p>
+
+      <div class="dlg-actions">
+        <button id="export-btn" type="button" class="btn">Download my data</button>
+        <span class="grow"></span>
+        <button id="settings-save" type="button" class="btn primary">Done</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>
