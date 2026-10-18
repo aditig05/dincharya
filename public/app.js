@@ -22,6 +22,24 @@ const store = {
 const newId = () => (crypto.randomUUID ? crypto.randomUUID() : 'id-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10));
 const catVar = (c) => `var(--c-${CATS[c] ? c : 'other'})`;
 
+// ---------- interface language ----------
+const I18N = window.DincharyaI18n || { hi: {}, cats: {} };
+let UI = 'en';
+function t(s, vars) {
+  let out = (UI === 'hi' && I18N.hi[s]) || s;
+  if (vars) for (const [k, v] of Object.entries(vars)) out = out.split(`{${k}}`).join(v);
+  return out;
+}
+const catLabel = (c) => (UI === 'hi' ? I18N.cats[c] : CATS[c]) || CATS.other;
+const LOC = () => (UI === 'hi' ? 'hi-IN' : 'en-IN'); // for weekday and month names
+function applyUI() {
+  document.documentElement.lang = UI;
+  document.querySelectorAll('[data-t]').forEach((n) => { n.textContent = t(n.dataset.t); });
+  document.querySelectorAll('[data-t-ph]').forEach((n) => { n.placeholder = t(n.dataset.tPh); });
+  document.querySelectorAll('[data-cat]').forEach((n) => { n.textContent = catLabel(n.dataset.cat); });
+  if (typeof syncText === 'string') $('sync-text').textContent = t(syncText);
+}
+
 // ---------- time helpers (pure functions live in core.js, shared with the tests) ----------
 const { pad, dayKey, fromDayKey, addDays, atTime, hhmm, fmtDur, fmtClock, resolveStart, resolveEnd, planActivities } = window.DincharyaCore;
 const fmtTime = (d) => d.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' }).replace(' ', '\u202f');
@@ -79,7 +97,7 @@ function undoChange(change) {
   }
   lastChange = null;
   save(); render();
-  toast('Undone.');
+  toast(t('Undone.'));
 }
 
 // ---------- turning what the model understood into entries ----------
@@ -89,12 +107,12 @@ function applyUnderstanding(data) {
   const cur = current(now.getTime());
 
   if (data.action === 'stop') {
-    if (!cur) return { ok: false, message: 'Nothing is running right now.' };
+    if (!cur) return { ok: false, message: t('Nothing is running right now.') };
     remember(change, cur);
     cur.end = now.toISOString();
     cur.planned = false;
     touch(cur);
-    commitChange(change, `Stopped ${cur.title}.`);
+    commitChange(change, t('Stopped {x}.', { x: cur.title }));
     return { ok: true };
   }
 
@@ -127,7 +145,9 @@ function applyUnderstanding(data) {
   change.created.push(...made.map((e) => e.id));
   // jump to the day of what was just logged
   selectedDay = dayKey(new Date(made[0].start));
-  const msg = made.length === 1 ? `Logged ${made[0].title}${made[0].end ? ` · ${fmtTime(new Date(made[0].start))}–${fmtTime(new Date(made[0].end))}` : ` from ${fmtTime(new Date(made[0].start))}`}.` : `Logged ${made.length} activities.`;
+  const first = made[0];
+  const when = first.end ? `${fmtTime(new Date(first.start))}–${fmtTime(new Date(first.end))}` : `${fmtTime(new Date(first.start))}–`;
+  const msg = made.length === 1 ? t('Logged {x}.', { x: `${first.title} · ${when}` }) : t('Logged {n} activities.', { n: made.length });
   commitChange(change, msg);
   if (made.some((e) => e.planned)) maybeAskAlertPermission();
   return { ok: true };
@@ -144,7 +164,7 @@ function extend(e, minutes) {
   e.end = new Date(base + minutes * MIN).toISOString();
   e.planned = true;
   touch(e);
-  commitChange(change, `${e.title} extended to ${fmtTime(new Date(e.end))}.`);
+  commitChange(change, t('{x} extended to {t}.', { x: e.title, t: fmtTime(new Date(e.end)) }));
 }
 
 // ---------- API ----------
@@ -202,9 +222,9 @@ function describeCurrent() {
 
 async function understand(text) {
   text = text.trim();
-  if (!text) { setReply('Say or type what you are doing.', true); return; }
+  if (!text) { setReply(t('Say or type what you are doing.'), true); return; }
   busy($('say-go'), true);
-  setReply('Got it, writing it down…');
+  setReply(t('Got it, writing it down…'));
   try {
     const data = await api('/api/understand', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -228,7 +248,6 @@ async function understand(text) {
 }
 
 $('say-form').onsubmit = (ev) => { ev.preventDefault(); understand($('say-text').value); };
-document.querySelectorAll('.chip').forEach((c) => { c.onclick = () => understand(c.dataset.text); });
 
 // ---------- recording ----------
 let recorder = null, chunks = [], micStream = null, micTick = null;
@@ -248,7 +267,7 @@ async function startRecording() {
   recorder.start();
   const started = Date.now();
   $('mic').setAttribute('aria-pressed', 'true');
-  setReply('Listening… tap the mic again when done.');
+  setReply(t('Listening… tap the mic again when done.'));
   micTick = setInterval(() => { if (Date.now() - started > MAX_SECONDS * 1000) stopRecording(); }, 250);
 }
 function stopRecording() {
@@ -264,7 +283,7 @@ async function onRecorded() {
   const form = new FormData();
   form.append('audio', blob, `speech.${type.includes('mp4') ? 'm4a' : type.includes('ogg') ? 'ogg' : 'webm'}`);
   $('mic').disabled = true;
-  setReply('Listening to that…');
+  setReply(t('Listening to that…'));
   try {
     const { transcript } = await api('/api/transcribe', { method: 'POST', body: form });
     $('say-text').value = transcript;
@@ -290,22 +309,22 @@ function renderNow() {
   if (cur) {
     card.style.setProperty('--c', catVar(cur.category));
     const start = new Date(cur.start).getTime();
-    box.append(el('p', { className: 'now-title' }, cur.title, el('span', { className: 'cat', textContent: CATS[cur.category] || 'Other' })));
+    box.append(el('p', { className: 'now-title' }, cur.title, el('span', { className: 'cat', textContent: catLabel(cur.category) })));
     const actions = el('div', { className: 'now-actions' });
     if (cur.end) {
       const end = new Date(cur.end).getTime();
       const left = end - now;
-      box.append(el('p', { className: 'now-meta' }, `${fmtTime(new Date(start))} – ${fmtTime(new Date(end))} · `, el('b', { textContent: fmtClock(left) }), ' left'));
+      box.append(el('p', { className: 'now-meta' }, `${fmtTime(new Date(start))} – ${fmtTime(new Date(end))} · `, el('b', { textContent: fmtClock(left) }), ' ', t('{x} left', { x: '' }).trim()));
       const bar = el('div', { className: 'bar' }, el('span'));
       bar.firstChild.style.width = `${Math.min(100, ((now - start) / (end - start)) * 100)}%`;
       box.append(bar);
-      actions.append(button('+10 min', () => extend(cur, 10)));
+      actions.append(button(t('+10 min'), () => extend(cur, 10)));
     } else {
-      box.append(el('p', { className: 'now-meta' }, `Since ${fmtTime(new Date(start))} · `, el('b', { textContent: fmtClock(now - start) })));
-      if (now - start > 4 * 60 * MIN) box.append(el('p', { className: 'hint tight', textContent: 'Running for a long time. Forgot to stop it?' }));
+      box.append(el('p', { className: 'now-meta' }, `${t('Since {t}', { t: fmtTime(new Date(start)) })} · `, el('b', { textContent: fmtClock(now - start) })));
+      if (now - start > 4 * 60 * MIN) box.append(el('p', { className: 'hint tight', textContent: t('Running for a long time. Forgot to stop it?') }));
     }
-    actions.append(button('Done', () => applyUnderstanding({ action: 'stop', activities: [] }), 'primary'));
-    if (!['break', 'meal'].includes(cur.category)) actions.append(button('Break 15m', () => startQuick('Break', 'break', 15)));
+    actions.append(button(t('Done'), () => applyUnderstanding({ action: 'stop', activities: [] }), 'primary'));
+    if (!['break', 'meal'].includes(cur.category)) actions.append(button(t('Break {x}', { x: '15m' }), () => startQuick('Break', 'break', 15)));
     box.append(actions);
     return;
   }
@@ -314,20 +333,20 @@ function renderNow() {
   if (ended) {
     card.style.setProperty('--c', catVar(ended.category));
     card.classList.add('overdue');
-    box.append(el('p', { className: 'now-title', textContent: `${ended.title} is over` }));
-    box.append(el('p', { className: 'now-meta' }, `Ended ${fmtDur(now - new Date(ended.end).getTime())} ago at ${fmtTime(new Date(ended.end))}.`));
+    box.append(el('p', { className: 'now-title', textContent: t('{x} is over', { x: ended.title }) }));
+    box.append(el('p', { className: 'now-meta' }, t('Ended {d} ago at {t}.', { d: fmtDur(now - new Date(ended.end).getTime()), t: fmtTime(new Date(ended.end)) })));
     const actions = el('div', { className: 'now-actions' });
     const resume = store.get(KEYS.resume, null);
     if (resume && resume.after === ended.id) {
-      actions.append(button(`Back to ${resume.title}`, () => { store.set(KEYS.resume, null); startQuick(resume.title, resume.category, 0); }, 'primary'));
+      actions.append(button(t('Back to {x}', { x: resume.title }), () => { store.set(KEYS.resume, null); startQuick(resume.title, resume.category, 0); }, 'primary'));
     }
-    actions.append(button('+10 min', () => extend(ended, 10)));
+    actions.append(button(t('+10 min'), () => extend(ended, 10)));
     box.append(actions);
     return;
   }
 
   card.style.setProperty('--c', 'var(--line)');
-  box.append(el('p', { className: 'now-idle', textContent: 'Nothing running. What are you doing?' }));
+  box.append(el('p', { className: 'now-idle', textContent: t('Nothing running. What are you doing?') }));
 }
 function button(label, onClick, cls = '') {
   const b = el('button', { className: 'btn ' + cls, type: 'button', textContent: label });
@@ -372,7 +391,7 @@ function entriesOn(key) {
 function renderDay() {
   const today = dayKey(new Date());
   const d = fromDayKey(selectedDay);
-  const label = selectedDay === today ? 'Today' : selectedDay === dayKey(addDays(new Date(), -1)) ? 'Yesterday' : d.toLocaleDateString('en-IN', { weekday: 'long' });
+  const label = selectedDay === today ? t('Today') : selectedDay === dayKey(addDays(new Date(), -1)) ? t('Yesterday') : d.toLocaleDateString(LOC(), { weekday: 'long' });
   $('day-h').textContent = label;
   $('date-pick').value = selectedDay;
   $('date-pick').max = today;
@@ -402,11 +421,11 @@ function renderDay() {
       seg.style.setProperty('--c', catVar(cat));
       seg.style.flex = String(ms);
       stack.append(seg);
-      const item = el('span', {}, el('i'), CATS[cat] || 'Other', ' ', el('b', { textContent: fmtDur(ms) }));
+      const item = el('span', {}, el('i'), catLabel(cat), ' ', el('b', { textContent: fmtDur(ms) }));
       item.style.setProperty('--c', catVar(cat));
       legend.append(item);
     }
-    tbox.append(stack, legend, el('div', { className: 'tracked', textContent: `${fmtDur(all)} logged` }));
+    tbox.append(stack, legend, el('div', { className: 'tracked', textContent: t('{d} logged', { d: fmtDur(all) }) }));
   }
 
   // timeline
@@ -417,7 +436,7 @@ function renderDay() {
     const s = new Date(x.start), e = x.end ? new Date(x.end) : null;
     const running = s.getTime() <= now && (!e || e.getTime() > now);
     if (prevEnd && s.getTime() - prevEnd > 15 * MIN && s.getTime() > ds) {
-      ol.append(el('li', { className: 't-item' }, el('span'), el('div', { className: 't-gap', textContent: `not logged · ${fmtDur(s.getTime() - prevEnd)}` })));
+      ol.append(el('li', { className: 't-item' }, el('span'), el('div', { className: 't-gap', textContent: t('not logged · {d}', { d: fmtDur(s.getTime() - prevEnd) }) })));
     }
     const card = el('button', { className: 't-card', type: 'button', title: 'Edit' });
     card.style.setProperty('--c', catVar(x.category));
@@ -425,14 +444,14 @@ function renderDay() {
       el('div', { className: 't-head' }, el('span', { className: 't-title', textContent: x.title }),
         el('span', { className: 't-dur', textContent: e ? fmtDur(e - s) : fmtDur(now - s) })),
       el('div', { className: 't-sub' },
-        el('span', { className: 'cat', textContent: CATS[x.category] || 'Other' }),
-        running ? el('span', { className: 't-live', textContent: '● now' }) : null,
+        el('span', { className: 'cat', textContent: catLabel(x.category) }),
+        running ? el('span', { className: 't-live', textContent: t('● now') }) : null,
         x.note ? el('span', { textContent: x.note }) : null),
     );
     card.style.setProperty('--c', catVar(x.category));
     card.querySelector('.cat').style.setProperty('--c', catVar(x.category));
     card.onclick = () => openEdit(x);
-    const time = el('div', { className: 't-time' }, el('b', { textContent: fmtTime(s) }), e ? `to ${fmtTime(e)}` : running ? 'now' : '');
+    const time = el('div', { className: 't-time' }, el('b', { textContent: fmtTime(s) }), e ? t('to {t}', { t: fmtTime(e) }) : running ? t('now') : '');
     ol.append(el('li', { className: 't-item' }, time, card));
     prevEnd = Math.max(prevEnd || 0, e ? e.getTime() : now);
   }
@@ -467,7 +486,7 @@ function dayFacts(key) {
   ].filter(Boolean).join('\n');
 }
 
-function render() { renderNow(); renderDay(); renderWeek(); }
+function render() { renderNow(); renderDay(); renderGoals(); renderWeek(); }
 
 $('prev-day').onclick = () => { selectedDay = dayKey(addDays(fromDayKey(selectedDay), -1)); renderDay(); };
 $('next-day').onclick = () => { selectedDay = dayKey(addDays(fromDayKey(selectedDay), 1)); renderDay(); };
@@ -475,11 +494,12 @@ $('date-pick').onchange = () => { if ($('date-pick').value) { selectedDay = $('d
 
 // ---------- add / edit ----------
 let editing = null;
-for (const [v, label] of Object.entries(CATS)) $('e-cat').append(el('option', { value: v, textContent: label }));
+function fillCatSelect(sel) { sel.replaceChildren(); for (const v of Object.keys(CATS)) sel.append(el('option', { value: v, textContent: catLabel(v) })); }
+fillCatSelect($('e-cat'));
 
 function openEdit(entry) {
   editing = entry || null;
-  $('edit-title').textContent = entry ? 'Edit activity' : 'Add activity';
+  $('edit-title').textContent = entry ? t('Edit activity') : t('Add activity');
   $('e-delete').hidden = !entry;
   $('edit-error').hidden = true;
   const s = entry ? new Date(entry.start) : atTime(fromDayKey(selectedDay), hhmm(new Date()));
@@ -509,7 +529,7 @@ $('edit-form').onsubmit = (ev) => {
   touch(e);
   $('edit').close();
   selectedDay = dayKey(start);
-  commitChange(change, editing ? 'Saved.' : `Added ${title}.`);
+  commitChange(change, editing ? t('Saved.') : t('Added {x}.', { x: title }));
 };
 $('e-delete').onclick = () => {
   if (!editing) return;
@@ -518,7 +538,7 @@ $('e-delete').onclick = () => {
   editing.deleted = true;
   touch(editing);
   $('edit').close();
-  commitChange(change, `Deleted ${editing.title}.`);
+  commitChange(change, t('Deleted {x}.', { x: editing.title }));
 };
 
 // ---------- spoken day summary ----------
@@ -550,7 +570,8 @@ $('summary-btn').onclick = async () => {
 // ---------- sync with the server database ----------
 // Signed-in users only: the session cookie identifies the account, so no passcode is needed.
 let cloud = false, signedIn = false, syncTimer = null, syncing = false, syncAgain = false;
-function syncState(state, text) { $('sync').dataset.state = state; $('sync-text').textContent = text; }
+let syncText = 'This device only';
+function syncState(state, text) { syncText = text; $('sync').dataset.state = state; $('sync-text').textContent = t(text); }
 
 function scheduleSync() { clearTimeout(syncTimer); syncTimer = setTimeout(syncNow, 600); }
 
@@ -598,6 +619,13 @@ async function syncNow() {
   }
 }
 window.addEventListener('online', scheduleSync);
+// Another tab changed the log: take its copy, so this tab never writes back an older version.
+window.addEventListener('storage', (ev) => {
+  if (ev.key === KEYS.entries) { entries = store.get(KEYS.entries, []); render(); }
+  if (ev.key === KEYS.dirty) dirty = new Set(store.get(KEYS.dirty, []));
+  if (ev.key === SETTINGS_KEY && ev.newValue) { settings = { ...defaults(), ...store.get(SETTINGS_KEY, {}) }; applySettings(); }
+  if (ev.key === KEYS.owner && ev.newValue !== ev.oldValue) location.reload(); // signed out / switched account elsewhere
+});
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && signedIn) { render(); syncNow(); } });
 setInterval(syncNow, 60 * 1000);
 
@@ -666,8 +694,9 @@ function startApp(user) {
   $('sync-help').textContent = cloud
     ? 'Your log is saved to your account and is the same on every device you sign in on.'
     : 'Cloud sync is not set up on this server yet, so your log is saved only in this browser. Download a copy now and then.';
-  render();
+  applySettings();
   syncNow();
+  loadSettings();
   checkNudges();
 }
 
@@ -705,16 +734,23 @@ $('delete-btn').onclick = async () => {
 };
 
 // ---------- settings ----------
-$('lang').value = store.get(KEYS.lang, 'en-IN');
 $('voice').checked = store.get(KEYS.voice, true);
 $('alerts').checked = store.get(KEYS.alerts, false);
 $('nudges').checked = store.get(KEYS.nudges, true);
-$('settings-btn').onclick = () => $('settings').showModal();
-$('account-btn').onclick = () => $('settings').showModal();
-$('sync').onclick = () => $('settings').showModal();
+$('settings-btn').onclick = openSettings;
+$('account-btn').onclick = openSettings;
+$('sync').onclick = openSettings;
 $('settings-save').onclick = () => {
-  store.set(KEYS.lang, $('lang').value);
   store.set(KEYS.voice, $('voice').checked);
+  const goals = {};
+  for (const c of GOAL_CATS) { const h = parseFloat($(`g-${c}`).value); if (h > 0 && h <= 24) goals[c] = Math.round(h * 60); }
+  const quick = [...$('quick-list').children].map((r) => {
+    const [title, cat, min] = r.querySelectorAll('input, select');
+    return { title: title.value.trim().slice(0, 30), category: cat.value, minutes: Math.max(0, Math.round(Number(min.value) || 0)) };
+  }).filter((q) => q.title);
+  settings = { ...settings, goals, quick, lang: $('lang').value, ui: $('ui').value };
+  saveSettings();
+  applySettings();
   store.set(KEYS.alerts, $('alerts').checked);
   store.set(KEYS.nudges, $('nudges').checked);
   checkNudges();
@@ -782,7 +818,7 @@ function logForQuestions() {
 }
 
 async function askLog(question) {
-  setReply('Looking through your days…');
+  setReply(t('Looking through your days…'));
   const data = await api('/api/ask', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ question, log: logForQuestions(), today: new Date().toDateString(), language_code: $('lang').value }),
@@ -829,8 +865,8 @@ function renderWeek() {
   const todayKey = dayKey(new Date());
   const thisMonday = (() => { const t = fromDayKey(todayKey); return addDays(t, -((t.getDay() + 6) % 7)); })();
   const end = addDays(weekStart, 6);
-  $('week-h').textContent = dayKey(weekStart) === dayKey(thisMonday) ? 'This week' : dayKey(weekStart) === dayKey(addDays(thisMonday, -7)) ? 'Last week' : 'Week';
-  $('week-range').textContent = `${weekStart.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })} – ${end.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}`;
+  $('week-h').textContent = dayKey(weekStart) === dayKey(thisMonday) ? t('This week') : dayKey(weekStart) === dayKey(addDays(thisMonday, -7)) ? t('Last week') : t('Week');
+  $('week-range').textContent = `${weekStart.toLocaleDateString(LOC(), { day: 'numeric', month: 'short' })} – ${end.toLocaleDateString(LOC(), { day: 'numeric', month: 'short' })}`;
   $('next-week').disabled = weekStart >= thisMonday;
 
   // streaks only make sense for the current week
@@ -840,7 +876,7 @@ function renderWeek() {
     for (const [cat, n] of streaks()) {
       const chip = el('span', { className: 'streak' });
       chip.innerHTML = FLAME;
-      chip.append(`${CATS[cat]} streak: ${n} days`);
+      chip.append(t('{c} streak: {n} days', { c: catLabel(cat), n }));
       sbox.append(chip);
     }
   }
@@ -860,7 +896,7 @@ function renderWeek() {
     const legend = el('div', { className: 'legend' });
     for (const [cat, ms] of sorted) {
       const seg = el('span'); seg.style.setProperty('--c', catVar(cat)); seg.style.flex = String(ms); stack.append(seg);
-      const item = el('span', {}, el('i'), CATS[cat], ' ', el('b', { textContent: fmtDur(ms) }));
+      const item = el('span', {}, el('i'), catLabel(cat), ' ', el('b', { textContent: fmtDur(ms) }));
       item.style.setProperty('--c', catVar(cat)); legend.append(item);
     }
     tbox.append(stack, legend);
@@ -875,7 +911,7 @@ function renderWeek() {
     bar.style.width = `${Math.max(2, (st.total / max) * 100)}%`;
     for (const [cat, ms] of [...st.by].sort((a, b) => b[1] - a[1])) { const seg = el('span'); seg.style.setProperty('--c', catVar(cat)); seg.style.flex = String(ms); bar.append(seg); }
     btn.append(
-      el('span', { className: 'wd-name' }, d.toLocaleDateString('en-IN', { weekday: 'short' }), el('small', { textContent: d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }) })),
+      el('span', { className: 'wd-name' }, d.toLocaleDateString(LOC(), { weekday: 'short' }), el('small', { textContent: d.toLocaleDateString(LOC(), { day: 'numeric', month: 'short' }) })),
       el('div', {}, bar),
       el('span', { className: 'wd-total', textContent: st.total ? fmtDur(st.total) : key > todayKey ? '' : '–' }),
     );
@@ -887,42 +923,48 @@ function renderWeek() {
   const facts = $('week-facts');
   facts.replaceChildren();
   const fact = (...parts) => facts.append(el('li', {}, ...parts));
-  if (!all) { fact('Nothing logged this week yet.'); return; }
+  if (!all) { fact(t('Nothing logged this week yet.')); return; }
   const focused = (week.get('work') || 0) + (week.get('study') || 0);
   const logged = days.filter((x) => x.st.total > 0).length;
-  if (focused) fact('Focused (work + study): ', el('b', { textContent: fmtDur(focused) }), ` · about ${fmtDur(focused / logged)} a day on days you logged`);
-  if (counts.get('break')) fact('Breaks: ', el('b', { textContent: `${counts.get('break')}` }), ` · average ${fmtDur((week.get('break') || 0) / counts.get('break'))}`);
-  if (counts.get('exercise')) fact('Exercise: ', el('b', { textContent: `${counts.get('exercise')} ${counts.get('exercise') === 1 ? 'time' : 'times'}` }), `, ${fmtDur(week.get('exercise'))} in total`);
+  if (focused) fact(t('Focused (work + study): '), el('b', { textContent: fmtDur(focused) }), t(' · about {d} a day on days you logged', { d: fmtDur(focused / logged) }));
+  if (counts.get('break')) fact(t('Breaks: '), el('b', { textContent: `${counts.get('break')}` }), t(' · average {d}', { d: fmtDur((week.get('break') || 0) / counts.get('break')) }));
+  if (counts.get('exercise')) fact(t('Exercise: '), el('b', { textContent: t('{n} times', { n: counts.get('exercise') }) }), t(', {d} in total', { d: fmtDur(week.get('exercise')) }));
   const best = days.reduce((m, x) => { const f = (x.st.by.get('work') || 0) + (x.st.by.get('study') || 0); return f > m.f ? { f, d: x.d } : m; }, { f: 0, d: null });
-  if (best.f) fact('Most focused day: ', el('b', { textContent: best.d.toLocaleDateString('en-IN', { weekday: 'long' }) }), ` (${fmtDur(best.f)})`);
-  if (week.get('sleep')) fact('Sleep logged: ', el('b', { textContent: fmtDur(week.get('sleep')) }));
+  if (best.f) fact(t('Most focused day: '), el('b', { textContent: best.d.toLocaleDateString(LOC(), { weekday: 'long' }) }), ` (${fmtDur(best.f)})`);
+  if (week.get('sleep')) fact(t('Sleep logged: '), el('b', { textContent: fmtDur(week.get('sleep')) }));
+  // daily goals: on how many of the days so far was each one met
+  const sofar = days.filter((x) => x.key <= todayKey);
+  for (const [cat, mins] of Object.entries(settings.goals || {})) {
+    const met = sofar.filter((x) => (x.st.by.get(cat) || 0) >= mins * MIN).length;
+    fact(el('b', { textContent: t('{c} goal met on {n} of {d} days', { c: catLabel(cat), n: met, d: sofar.length }) }));
+  }
 }
 
 // ---------- gentle nudges ----------
 // Checked once a minute while the app is open. Each nudge fires once (remembered per day).
 function nudgeKey(id) { return `${dayKey(new Date())}:${id}`; }
 function findNudge(now = new Date()) {
-  const t = now.getTime(), h = now.getHours() + now.getMinutes() / 60;
-  const cur = current(t);
+  const tm = now.getTime(), h = now.getHours() + now.getMinutes() / 60;
+  const cur = current(tm);
   const today = dayKey(now);
   const st = dayStats(today);
   const loggedToday = st.total > 0;
   if (cur) {
-    const ran = t - new Date(cur.start).getTime();
-    if (cur.category === 'break' && !cur.end && ran > 45 * MIN) return { id: `long-break-${cur.id}`, text: `You've been on a break for ${fmtDur(ran)}. Ready to get back?`, actions: ['done'] };
-    if (cur.category === 'meal' && !cur.end && ran > 75 * MIN) return { id: `long-meal-${cur.id}`, text: `${cur.title} has been running for ${fmtDur(ran)}. Finished?`, actions: ['done'] };
+    const ran = tm - new Date(cur.start).getTime();
+    if (cur.category === 'break' && !cur.end && ran > 45 * MIN) return { id: `long-break-${cur.id}`, text: t("You've been on a break for {d}. Ready to get back?", { d: fmtDur(ran) }), actions: ['done'] };
+    if (cur.category === 'meal' && !cur.end && ran > 75 * MIN) return { id: `long-meal-${cur.id}`, text: t('{x} has been running for {d}. Finished?', { x: cur.title, d: fmtDur(ran) }), actions: ['done'] };
     if (['work', 'study'].includes(cur.category) && ran > 2 * 60 * MIN) {
       const hrs = Math.floor(ran / (60 * MIN));
-      return { id: `long-focus-${cur.id}-${hrs}`, text: `${fmtDur(ran)} of ${cur.title} without a break. A 10-minute break?`, actions: ['break10'] };
+      return { id: `long-focus-${cur.id}-${hrs}`, text: t('{d} of {x} without a break. A 10-minute break?', { d: fmtDur(ran), x: cur.title }), actions: ['break10'] };
     }
   }
   const meals = entriesOn(today).filter((x) => x.category === 'meal');
   const mealBetween = (a, b) => meals.some((x) => { const mh = new Date(x.start).getHours(); return mh >= a && mh < b; });
-  if (loggedToday && h >= 14.5 && h < 17 && !mealBetween(11, 17)) return { id: 'no-lunch', text: 'No lunch logged yet today. Eaten something?', actions: ['lunch'] };
-  if (loggedToday && h >= 21.5 && !mealBetween(18, 24)) return { id: 'no-dinner', text: 'No dinner logged yet tonight.', actions: ['dinner'] };
+  if (loggedToday && h >= 14.5 && h < 17 && !mealBetween(11, 17)) return { id: 'no-lunch', text: t('No lunch logged yet today. Eaten something?'), actions: ['lunch'] };
+  if (loggedToday && h >= 21.5 && !mealBetween(18, 24)) return { id: 'no-dinner', text: t('No dinner logged yet tonight.'), actions: ['dinner'] };
   if (!cur && loggedToday && h >= 9 && h < 23) {
-    const lastEnd = Math.max(...live().map((x) => (x.end ? new Date(x.end).getTime() : t)).filter((v) => v <= t));
-    if (Number.isFinite(lastEnd) && t - lastEnd > 2 * 60 * MIN) return { id: `gap-${Math.floor(lastEnd / MIN)}`, text: `Nothing logged since ${fmtTime(new Date(lastEnd))}. What have you been up to?`, actions: ['log'] };
+    const lastEnd = Math.max(...live().map((x) => (x.end ? new Date(x.end).getTime() : tm)).filter((v) => v <= tm));
+    if (Number.isFinite(lastEnd) && tm - lastEnd > 2 * 60 * MIN) return { id: `gap-${Math.floor(lastEnd / MIN)}`, text: t('Nothing logged since {t}. What have you been up to?', { t: fmtTime(new Date(lastEnd)) }), actions: ['log'] };
   }
   return null;
 }
@@ -942,8 +984,8 @@ function checkNudges() {
   const box = $('nudge-actions');
   box.replaceChildren();
   const close = () => { done.add(nudgeKey(n.id)); store.set(KEYS.nudged, [...done].slice(-60)); $('nudge').hidden = true; };
-  for (const a of n.actions) { const [label, fn] = NUDGE_ACTIONS[a]; box.append(button(label, () => { close(); fn(); }, 'primary')); }
-  box.append(button('Dismiss', close));
+  for (const a of n.actions) { const [labelKey, fn] = NUDGE_ACTIONS[a]; const label = t(labelKey); box.append(button(label, () => { close(); fn(); }, 'primary')); }
+  box.append(button(t('Dismiss'), close));
   if ($('nudge').hidden) { // first time this nudge shows
     $('nudge').hidden = false;
     if ($('alerts').checked) notify('Dincharya', n.text, n.id);
@@ -977,18 +1019,118 @@ $('install-btn').onclick = async () => {
 $('install-close').onclick = () => { $('install').hidden = true; store.set(KEYS.installNo, true); };
 window.addEventListener('appinstalled', () => { $('install').hidden = true; });
 
+
+// ---------- account settings: goals, quick buttons, languages (synced) ----------
+const SETTINGS_KEY = 'dincharya.settings';
+const DEFAULT_QUICK = [
+  { title: 'Break', category: 'break', minutes: 15 }, { title: 'Lunch', category: 'meal', minutes: 0 },
+  { title: 'Study', category: 'study', minutes: 0 }, { title: 'Work', category: 'work', minutes: 0 },
+  { title: 'Gym', category: 'exercise', minutes: 60 },
+];
+const defaults = () => ({ goals: {}, quick: DEFAULT_QUICK.map((q) => ({ ...q })), lang: store.get(KEYS.lang, 'en-IN'), ui: 'en' });
+let settings = { ...defaults(), ...(store.get(SETTINGS_KEY, null) || {}) };
+
+function applySettings() {
+  UI = settings.ui === 'hi' ? 'hi' : 'en';
+  $('ui').value = UI;
+  $('lang').value = settings.lang === 'hi-IN' ? 'hi-IN' : 'en-IN';
+  fillCatSelect($('e-cat'));
+  applyUI();
+  renderChips();
+  render();
+}
+function saveSettings() {
+  store.set(SETTINGS_KEY, settings);
+  if (signedIn && cloud) api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ settings }) }).catch(() => {});
+}
+async function loadSettings() {
+  if (!cloud) return;
+  try {
+    const d = await api('/api/settings');
+    if (d.settings) { settings = { ...defaults(), ...d.settings }; store.set(SETTINGS_KEY, settings); applySettings(); }
+    else saveSettings(); // first time on the server: upload this device's settings
+  } catch { /* offline: keep the local copy */ }
+}
+
+const shortDur = (m) => (m >= 60 && m % 60 === 0 ? `${m / 60}h` : `${m}m`);
+function renderChips() {
+  const box = $('chips');
+  box.replaceChildren();
+  for (const q of settings.quick || []) {
+    const b = el('button', { className: 'chip', type: 'button', textContent: q.minutes ? `${q.title} ${shortDur(q.minutes)}` : q.title });
+    b.onclick = () => startQuick(q.title, q.category, q.minutes || 0);
+    box.append(b);
+  }
+  const done = el('button', { className: 'chip done-chip', type: 'button', textContent: t('Done') });
+  done.onclick = () => { const r = applyUnderstanding({ action: 'stop', activities: [] }); if (!r.ok) setReply(r.message, true); };
+  box.append(done);
+}
+
+// goal progress for the selected day
+function renderGoals() {
+  const box = $('goals');
+  box.replaceChildren();
+  const goals = Object.entries(settings.goals || {});
+  if (!goals.length) return;
+  const st = dayStats(selectedDay);
+  for (const [cat, mins] of goals) {
+    const doneMs = st.by.get(cat) || 0, goalMs = mins * MIN;
+    const row = el('div', { className: 'goal' + (doneMs >= goalMs ? ' met' : '') });
+    row.style.setProperty('--c', catVar(cat));
+    const bar = el('div', { className: 'gbar' }, el('span'));
+    bar.firstChild.style.width = `${Math.min(100, (doneMs / goalMs) * 100)}%`;
+    row.append(el('span', { textContent: catLabel(cat) }), bar, el('span', { className: 'gval', textContent: `${fmtDur(doneMs)} / ${fmtDur(goalMs)}${doneMs >= goalMs ? ' ✓' : ''}` }));
+    box.append(row);
+  }
+}
+
+// settings dialog: goals and quick-button editor
+const GOAL_CATS = ['study', 'work', 'exercise', 'sleep'];
+function quickRow(q = { title: '', category: 'break', minutes: 0 }) {
+  const row = el('div', { className: 'quick-row' });
+  const title = el('input', { value: q.title, maxLength: 30, placeholder: t('Name') });
+  const cat = el('select'); fillCatSelect(cat); cat.value = q.category;
+  const min = el('input', { type: 'number', min: '0', max: '1440', step: '5', value: q.minutes || '', placeholder: t('Minutes') });
+  const x = el('button', { className: 'x', type: 'button', textContent: '×', title: 'Remove' });
+  x.onclick = () => row.remove();
+  title.setAttribute('aria-label', 'Button name'); cat.setAttribute('aria-label', 'Type'); min.setAttribute('aria-label', 'Minutes');
+  row.append(title, cat, min, x);
+  return row;
+}
+function openSettings() {
+  for (const c of GOAL_CATS) $(`g-${c}`).value = settings.goals?.[c] ? +(settings.goals[c] / 60).toFixed(2) : '';
+  $('quick-list').replaceChildren(...(settings.quick || []).map(quickRow));
+  $('settings').showModal();
+}
+$('quick-add').onclick = () => { if ($('quick-list').children.length < 12) $('quick-list').append(quickRow()); };
+
+// ---------- CSV export ----------
+$('csv-btn').onclick = () => {
+  const esc = (v) => `"${String(v ?? '').replace(/^([=+\-@])/, "'$1").replace(/"/g, '""')}"`; // defuse spreadsheet formulas
+  const rows = live().sort((a, b) => new Date(a.start) - new Date(b.start)).map((e) => {
+    const s = new Date(e.start), en = e.end ? new Date(e.end) : null;
+    return [dayKey(s), hhmm(s), en ? hhmm(en) : '', en ? Math.round((en - s) / MIN) : '', e.title, e.category, e.note].map(esc).join(',');
+  });
+  const csv = ['date,start,end,duration_minutes,activity,type,note', ...rows].join('\n');
+  const a = el('a', { href: URL.createObjectURL(new Blob(['﻿' + csv], { type: 'text/csv' })), download: `dincharya-${dayKey(new Date())}.csv` });
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+};
+
 // ---------- toast ----------
 let toastTimer = null;
 function toast(msg, undo) {
   clearTimeout(toastTimer);
   $('toast-text').textContent = msg;
   $('toast-undo').hidden = !undo;
+  $('toast-undo').textContent = t('Undo');
   $('toast-undo').onclick = () => { $('toast').hidden = true; undo(); };
   $('toast').hidden = false;
   toastTimer = setTimeout(() => { $('toast').hidden = true; }, undo ? 6000 : 3000);
 }
 
 // ---------- start ----------
+applySettings();
 boot();
 let lastMinute = new Date().getMinutes();
 setInterval(() => {

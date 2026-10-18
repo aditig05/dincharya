@@ -21,7 +21,7 @@
     <div class="top-inner">
       <div class="brand">
         <h1>Dincharya <span>दिनचर्या</span></h1>
-        <p>Say what you're doing. Dincharya keeps your day.</p>
+        <p data-t="Say what you're doing. Dincharya keeps your day.">Say what you're doing. Dincharya keeps your day.</p>
       </div>
       <div class="top-tools" id="top-tools" hidden>
         <button id="sync" class="sync" type="button" data-state="local" title="Backup and sync">
@@ -64,14 +64,14 @@
 
     <!-- add to home screen -->
     <section id="install" class="install" hidden>
-      <p><b>Put Dincharya on your home screen</b> for one-tap logging and alerts.</p>
-      <button id="install-btn" class="btn primary" type="button">Install</button>
-      <button id="install-close" class="btn" type="button" aria-label="Not now">Not now</button>
+      <p data-t="Put Dincharya on your home screen for one-tap logging and alerts.">Put Dincharya on your home screen for one-tap logging and alerts.</p>
+      <button id="install-btn" class="btn primary" type="button" data-t="Install">Install</button>
+      <button id="install-close" class="btn" type="button" aria-label="Not now" data-t="Not now">Not now</button>
     </section>
 
     <!-- what is happening right now -->
     <section id="now" class="card now" aria-live="polite">
-      <div class="now-label">Right now</div>
+      <div class="now-label" data-t="Right now">Right now</div>
       <div id="now-body"></div>
     </section>
 
@@ -84,27 +84,20 @@
         </button>
         <form id="say-form" class="say-form">
           <label for="say-text" class="sr">What are you doing?</label>
-          <input id="say-text" type="text" autocomplete="off" placeholder="“Break for 30 min” · “2 se 5 tak DSA kiya” · “Kal maine kya kiya?”">
-          <button id="say-go" class="btn primary" type="submit">Log</button>
+          <input id="say-text" type="text" autocomplete="off" placeholder="“Break for 30 min” · “2 se 5 tak DSA kiya” · “Kal maine kya kiya?”" data-t-ph="“Break for 30 min” · “2 se 5 tak DSA kiya” · “Kal maine kya kiya?”">
+          <button id="say-go" class="btn primary" type="submit" data-t="Log">Log</button>
         </form>
       </div>
-      <p id="mic-hint" class="hint">Tap the mic and say what you are doing, or ask about your days (“is hafte kitna padha?”). English, Hindi or a mix.</p>
-      <div class="chips" aria-label="Quick log">
-        <button class="chip" type="button" data-text="taking a break for 15 minutes">Break 15m</button>
-        <button class="chip" type="button" data-text="having lunch">Lunch</button>
-        <button class="chip" type="button" data-text="starting to study">Study</button>
-        <button class="chip" type="button" data-text="starting work">Work</button>
-        <button class="chip" type="button" data-text="going to the gym for an hour">Gym 1h</button>
-        <button class="chip" type="button" data-text="done">Done</button>
-      </div>
+      <p id="mic-hint" class="hint" data-t="Tap the mic and say what you are doing, or ask about your days (“is hafte kitna padha?”). English, Hindi or a mix.">Tap the mic and say what you are doing, or ask about your days (“is hafte kitna padha?”). English, Hindi or a mix.</p>
+      <div class="chips" id="chips" aria-label="Quick log"></div>
       <p id="reply" class="reply" role="status" aria-live="polite"></p>
     </section>
 
     <!-- the selected day -->
     <section class="card day" aria-labelledby="day-h">
       <div class="seg" role="tablist" aria-label="View">
-        <button id="tab-day" class="seg-btn" role="tab" aria-selected="true" type="button">Day</button>
-        <button id="tab-week" class="seg-btn" role="tab" aria-selected="false" type="button">Week</button>
+        <button id="tab-day" class="seg-btn" role="tab" aria-selected="true" type="button" data-t="Day">Day</button>
+        <button id="tab-week" class="seg-btn" role="tab" aria-selected="false" type="button" data-t="Week">Week</button>
       </div>
       <div id="day-view">
       <div class="day-nav">
@@ -117,15 +110,16 @@
       </div>
 
       <div id="totals" class="totals"></div>
+      <div id="goals" class="goals"></div>
 
       <ol id="timeline" class="timeline"></ol>
       <div id="day-empty" class="empty" hidden>
-        <p>Nothing logged on this day.</p>
+        <p data-t="Nothing logged on this day.">Nothing logged on this day.</p>
       </div>
 
       <div class="day-tools">
-        <button id="add-btn" class="btn" type="button">+ Add manually</button>
-        <button id="summary-btn" class="btn" type="button">Summarise this day</button>
+        <button id="add-btn" class="btn" type="button" data-t="+ Add manually">+ Add manually</button>
+        <button id="summary-btn" class="btn" type="button" data-t="Summarise this day">Summarise this day</button>
       </div>
       <div id="summary-box" class="summary" hidden>
         <p id="summary-text"></p>
@@ -184,37 +178,60 @@
   <!-- settings -->
   <dialog id="settings">
     <form method="dialog" class="dlg">
-      <h3>Settings</h3>
-      <label class="field">Reply language
-        <select id="lang">
-          <option value="en-IN">English</option>
-          <option value="hi-IN">हिन्दी · Hindi</option>
-        </select>
-      </label>
-      <label class="check"><input id="voice" type="checkbox" checked> Speak replies out loud</label>
-      <label class="check"><input id="alerts" type="checkbox"> Alert me when a timed activity ends</label>
-      <label class="check"><input id="nudges" type="checkbox" checked> Gentle nudges (long breaks, missed meals, long sessions)</label>
+      <h3 data-t="Settings">Settings</h3>
+      <div class="field-row two">
+        <label class="field"><span data-t="App language">App language</span>
+          <select id="ui">
+            <option value="en">English</option>
+            <option value="hi">हिन्दी</option>
+          </select>
+        </label>
+        <label class="field"><span data-t="Reply language">Reply language</span>
+          <select id="lang">
+            <option value="en-IN">English</option>
+            <option value="hi-IN">हिन्दी · Hindi</option>
+          </select>
+        </label>
+      </div>
+      <label class="check"><input id="voice" type="checkbox" checked> <span data-t="Speak replies out loud">Speak replies out loud</span></label>
+      <label class="check"><input id="alerts" type="checkbox"> <span data-t="Alert me when a timed activity ends">Alert me when a timed activity ends</span></label>
+      <label class="check"><input id="nudges" type="checkbox" checked> <span data-t="Gentle nudges (long breaks, missed meals, long sessions)">Gentle nudges (long breaks, missed meals, long sessions)</span></label>
 
-      <h4>Account</h4>
+      <h4 data-t="Daily goals">Daily goals</h4>
+      <p class="hint tight" data-t="Hours per day. Leave empty for no goal.">Hours per day. Leave empty for no goal.</p>
+      <div class="goal-inputs">
+        <label class="field"><span data-cat="study">Study</span><input id="g-study" type="number" min="0" max="24" step="0.5" inputmode="decimal"></label>
+        <label class="field"><span data-cat="work">Work</span><input id="g-work" type="number" min="0" max="24" step="0.5" inputmode="decimal"></label>
+        <label class="field"><span data-cat="exercise">Exercise</span><input id="g-exercise" type="number" min="0" max="24" step="0.25" inputmode="decimal"></label>
+        <label class="field"><span data-cat="sleep">Sleep</span><input id="g-sleep" type="number" min="0" max="24" step="0.5" inputmode="decimal"></label>
+      </div>
+
+      <h4 data-t="Quick buttons">Quick buttons</h4>
+      <p class="hint tight" data-t="One tap starts these instantly, even offline. Minutes empty = until you start the next thing.">One tap starts these instantly, even offline. Minutes empty = until you start the next thing.</p>
+      <div id="quick-list" class="quick-list"></div>
+      <button id="quick-add" type="button" class="btn" data-t="+ Add button">+ Add button</button>
+
+      <h4 data-t="Account">Account</h4>
       <div class="account">
         <img id="acc-pic" alt="" referrerpolicy="no-referrer" hidden>
         <div><b id="acc-name"></b><br><span id="acc-email" class="hint tight"></span></div>
       </div>
       <p id="sync-help" class="hint tight"></p>
       <div class="dlg-actions">
-        <button id="logout-btn" type="button" class="btn">Sign out</button>
-        <button id="delete-btn" type="button" class="btn danger">Delete account</button>
+        <button id="export-btn" type="button" class="btn" data-t="Download JSON">Download JSON</button>
+        <button id="csv-btn" type="button" class="btn" data-t="Download CSV">Download CSV</button>
       </div>
-
       <div class="dlg-actions">
-        <button id="export-btn" type="button" class="btn">Download my data</button>
+        <button id="logout-btn" type="button" class="btn" data-t="Sign out">Sign out</button>
+        <button id="delete-btn" type="button" class="btn danger" data-t="Delete account">Delete account</button>
         <span class="grow"></span>
-        <button id="settings-save" type="button" class="btn primary">Done</button>
+        <button id="settings-save" type="button" class="btn primary" data-t="Done">Done</button>
       </div>
     </form>
   </dialog>
 
   <script src="core.js"></script>
+  <script src="i18n.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

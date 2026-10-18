@@ -30,6 +30,9 @@ A voice-first log of your day. Speak naturally, in English, Hindi or Hinglish, a
 - **Gentle nudges:** a long break, a missed lunch or dinner, 2+ hours without a break, or nothing logged for a while.
 - **Install it:** add it to your phone's home screen like an app; it opens offline and shows alerts as notifications.
 - **Summarise this day:** a short spoken review of your day with one suggestion for tomorrow.
+- **Daily goals:** e.g. Study 4h, Exercise 1h, with progress bars on Today and "goal met on 4 of 7 days" in the week view.
+- **Your own quick buttons:** one tap starts "Gym 1h" or "Reading 30m" instantly, even offline.
+- **Hindi or English interface,** plus CSV and JSON export.
 - **Edit anything, undo anything:** tap an activity to fix it, or undo the last change.
 - **Sign in with Google:** each person gets their own private log, saved to a Postgres database and the same on every device. The browser keeps a copy, so it works offline and syncs when you're back online.
 - **Your data, your call:** download everything as JSON, sign out (the device forgets the log), or delete your account and all its data.
@@ -61,5 +64,7 @@ npm install
 cp .env.example .env      # SARVAM_API_KEY (+ optional GROQ/GEMINI keys), DATABASE_URL, GOOGLE_CLIENT_ID, SESSION_SECRET
 npm start
 ```
+
+Run the tests with `npm test` (set `TEST_DATABASE_URL` to a throwaway Postgres to include the database tests). CI runs them on every push.
 
 Open http://localhost:3000. For local testing without Google, set `DEV_LOGIN=1` to get a test sign-in button. Without `DATABASE_URL` the log stays in the browser.

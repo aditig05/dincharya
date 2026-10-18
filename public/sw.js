@@ -1,7 +1,7 @@
 // Dincharya service worker: lets the installed app open without internet (the log itself lives in
 // the page's storage) and shows notifications. API calls always go to the network.
-const CACHE = 'dincharya-v3';
-const SHELL = ['./', 'index.html', 'privacy.html', 'terms.html', 'core.js', 'app.js', 'style.css', 'manifest.json', 'icon-192.png', 'icon-512.png'];
+const CACHE = 'dincharya-v4';
+const SHELL = ['./', 'index.html', 'privacy.html', 'terms.html', 'core.js', 'i18n.js', 'app.js', 'style.css', 'manifest.json', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

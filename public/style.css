@@ -238,3 +238,22 @@ dialog::backdrop { background: rgba(29,43,58,.5); }
 .legal p, .legal li { line-height: 1.6; }
 .legal ul { padding-left: 1.2rem; margin: .3rem 0; }
 .foot a, .signin-card a, .legal a { color: inherit; }
+
+/* ---------- goals + quick buttons ---------- */
+.goals { display: grid; gap: .45rem; margin: .4rem 0 .2rem; }
+.goal { display: grid; grid-template-columns: 5.5rem 1fr auto; gap: .6rem; align-items: center; font-size: .88rem; }
+.goal .gbar { height: .5rem; background: var(--bg); border-radius: 999px; overflow: hidden; }
+.goal .gbar > span { display: block; height: 100%; background: var(--c); border-radius: inherit; }
+.goal .gval { color: var(--ink-soft); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.goal.met .gval { color: var(--good); font-weight: 800; }
+.goal-inputs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .5rem; }
+.field-row.two { grid-template-columns: 1fr 1fr; }
+.quick-list { display: grid; gap: .4rem; }
+.quick-row { display: grid; grid-template-columns: 1.4fr 1fr 4.5rem auto; gap: .4rem; align-items: center; }
+.quick-row .x { background: none; border: 0; font-size: 1.2rem; color: var(--ink-soft); cursor: pointer; }
+.chip.done-chip { background: var(--ink); color: #fff; border-color: var(--ink); }
+@media (max-width: 520px) {
+  .goal-inputs { grid-template-columns: 1fr 1fr; }
+  .quick-row { grid-template-columns: 1fr 1fr; }
+  .quick-row input[type=number] { grid-column: 1; }
+}
