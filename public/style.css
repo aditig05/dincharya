@@ -231,3 +231,10 @@ dialog::backdrop { background: rgba(29,43,58,.5); }
 .avatar-btn img { width: 100%; height: 100%; object-fit: cover; }
 .account { display: flex; align-items: center; gap: .7rem; }
 .account img { width: 2.6rem; height: 2.6rem; border-radius: 50%; }
+
+/* ---------- legal pages ---------- */
+.home { color: inherit; text-decoration: none; }
+.legal h3 { margin: 1.2rem 0 .3rem; font-size: 1.05rem; }
+.legal p, .legal li { line-height: 1.6; }
+.legal ul { padding-left: 1.2rem; margin: .3rem 0; }
+.foot a, .signin-card a, .legal a { color: inherit; }

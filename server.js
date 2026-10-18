@@ -19,6 +19,45 @@ const langCode = (l) => (LANGUAGES[l] ? l : 'en-IN');
 const replyIn = (code) => (code === 'en-IN' ? 'simple English' : `simple ${LANGUAGES[code].name}, written entirely in ${LANGUAGES[code].script} script`);
 
 app.set('trust proxy', true);
+app.disable('x-powered-by');
+
+// Security headers for API responses and local serving (vercel.json sets the same for static files).
+export const CSP = [
+  "default-src 'self'",
+  "script-src 'self' https://accounts.google.com/gsi/client",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://accounts.google.com/gsi/style",
+  "font-src 'self' https://fonts.gstatic.com",
+  "img-src 'self' data: https://*.googleusercontent.com",
+  "media-src 'self' data: blob:",
+  "connect-src 'self' https://accounts.google.com/gsi/",
+  "frame-src https://accounts.google.com/gsi/",
+  "worker-src 'self'",
+  "manifest-src 'self'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join('; ');
+app.use((req, res, next) => {
+  res.set({
+    'Content-Security-Policy': CSP,
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'strict-origin-when-cross-origin',
+    'Permissions-Policy': 'microphone=(self), camera=(), geolocation=()',
+    'Cross-Origin-Opener-Policy': 'same-origin-allow-popups', // Google sign-in popup
+  });
+  if (req.path.startsWith('/api/')) res.set('Cache-Control', 'no-store');
+  next();
+});
+
+// Changes must come from our own pages: with SameSite=Lax cookies this blocks cross-site form posts.
+app.use('/api', (req, res, next) => {
+  if (req.method === 'GET' || req.method === 'HEAD') return next();
+  const origin = req.get('origin');
+  let sameSite = true;
+  if (origin) { try { sameSite = new URL(origin).host === req.get('host'); } catch { sameSite = false; } }
+  if (!sameSite) return res.status(403).json({ error: 'Cross-site request blocked.' });
+  next();
+});
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(__dirname, 'public'))); // local only; Vercel serves public/ from its CDN
 
@@ -275,8 +314,11 @@ app.post('/api/auth/logout', (req, res) => { setSession(res, '', 0); res.json({ 
 const db = process.env.DATABASE_URL
   ? new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 3, ssl: /localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL) ? false : { rejectUnauthorized: false } })
   : null;
-let schemaReady = null;
-const ensureSchema = () => (schemaReady ??= db.query(`
+// Versioned migrations: each runs once, in order, inside a transaction, and is recorded in
+// dincharya_migrations. An advisory lock stops two server instances migrating at the same time.
+// Never edit a released migration; add a new one.
+const MIGRATIONS = [
+  /* 1: accounts and activities */ `
   CREATE TABLE IF NOT EXISTS dincharya_users (
     id text PRIMARY KEY,
     email text NOT NULL DEFAULT '',
@@ -298,11 +340,37 @@ const ensureSchema = () => (schemaReady ??= db.query(`
     synced_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (user_id, id)
   );
-  CREATE INDEX IF NOT EXISTS dincharya_activities_sync ON dincharya_activities (user_id, synced_at);
-`).catch((e) => { schemaReady = null; throw e; }));
+  CREATE INDEX IF NOT EXISTS dincharya_activities_sync ON dincharya_activities (user_id, synced_at);`,
+  /* 2: per-user settings (goals, quick buttons, language) */ `
+  CREATE TABLE IF NOT EXISTS dincharya_settings (
+    user_id text PRIMARY KEY REFERENCES dincharya_users (id) ON DELETE CASCADE,
+    data jsonb NOT NULL DEFAULT '{}'::jsonb,
+    updated_at timestamptz NOT NULL DEFAULT now()
+  );`,
+];
+export async function migrate(pool = db) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock(727274)');
+    await client.query('CREATE TABLE IF NOT EXISTS dincharya_migrations (version int PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())');
+    const { rows } = await client.query('SELECT coalesce(max(version), 0) AS v FROM dincharya_migrations');
+    for (let v = rows[0].v + 1; v <= MIGRATIONS.length; v++) {
+      await client.query(MIGRATIONS[v - 1]);
+      await client.query('INSERT INTO dincharya_migrations (version) VALUES ($1)', [v]);
+    }
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally { client.release(); }
+}
+let schemaReady = null;
+const ensureSchema = () => (schemaReady ??= migrate().catch((e) => { schemaReady = null; throw e; }));
 
 function requireDb() { if (!db) throw new ApiError('Cloud sync is not set up on the server.', 503); }
 const ID_RE = /^[\w-]{8,64}$/;
+const CURSOR_RE = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}(:?\d{2})?)?$/;
 const asDate = (v) => { const d = new Date(v); return Number.isFinite(d.getTime()) ? d : null; };
 
 // rows of this user changed since the cursor (all rows on first sync)
@@ -310,14 +378,16 @@ app.get('/api/entries', authed, async (req, res) => {
   try {
     requireDb();
     await ensureSchema();
-    const since = asDate(req.query.since);
+    // the cursor is Postgres' own text timestamp (microseconds); a JS Date would round it to
+    // milliseconds and re-send the last row on every sync
+    const since = typeof req.query.since === 'string' && CURSOR_RE.test(req.query.since) ? req.query.since : null;
     const { rows } = await db.query(
-      `SELECT id, title, category, start_at, end_at, note, deleted, updated_at, synced_at FROM dincharya_activities
+      `SELECT id, title, category, start_at, end_at, note, deleted, updated_at, synced_at::text AS cursor FROM dincharya_activities
        WHERE user_id = $1 AND ($2::timestamptz IS NULL OR synced_at > $2) ORDER BY synced_at LIMIT 5000`,
       [req.user.id, since],
     );
     res.json({
-      cursor: rows.length ? rows[rows.length - 1].synced_at : since,
+      cursor: rows.length ? rows[rows.length - 1].cursor : since,
       entries: rows.map((r) => ({ id: r.id, title: r.title, category: r.category, start: r.start_at, end: r.end_at, note: r.note, deleted: r.deleted, updatedAt: r.updated_at })),
     });
   } catch (e) { fail(res, e, 'Could not load from the cloud.'); }
@@ -350,6 +420,52 @@ app.post('/api/entries', authed, async (req, res) => {
   } catch (e) { fail(res, e, 'Could not save to the cloud.'); }
 });
 
+// per-user settings: daily goals, quick buttons, reply language (validated, then stored as JSON)
+function cleanSettings(raw) {
+  const out = {};
+  if (raw?.goals && typeof raw.goals === 'object') {
+    out.goals = {};
+    for (const [cat, min] of Object.entries(raw.goals)) {
+      const m = Math.round(Number(min));
+      if (CATEGORIES.includes(cat) && m > 0 && m <= 24 * 60) out.goals[cat] = m;
+    }
+  }
+  if (Array.isArray(raw?.quick)) {
+    out.quick = raw.quick.slice(0, 12).map((q) => ({
+      title: String(q?.title || '').trim().slice(0, 30),
+      category: CATEGORIES.includes(q?.category) ? q.category : 'other',
+      minutes: Math.max(0, Math.min(24 * 60, Math.round(Number(q?.minutes) || 0))),
+    })).filter((q) => q.title);
+  }
+  if (LANGUAGES[raw?.lang]) out.lang = raw.lang;
+  if (['en', 'hi'].includes(raw?.ui)) out.ui = raw.ui;
+  return out;
+}
+
+app.get('/api/settings', authed, async (req, res) => {
+  try {
+    requireDb();
+    await ensureSchema();
+    const { rows } = await db.query('SELECT data, updated_at FROM dincharya_settings WHERE user_id = $1', [req.user.id]);
+    res.json({ settings: rows[0]?.data || null, updatedAt: rows[0]?.updated_at || null });
+  } catch (e) { fail(res, e, 'Could not load settings.'); }
+});
+
+app.put('/api/settings', authed, async (req, res) => {
+  try {
+    requireDb();
+    await ensureSchema();
+    const settings = cleanSettings(req.body?.settings);
+    await db.query(`INSERT INTO dincharya_users (id, email, name) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, [req.user.id, req.user.email || '', req.user.name || '']);
+    await db.query(
+      `INSERT INTO dincharya_settings (user_id, data, updated_at) VALUES ($1, $2, now())
+       ON CONFLICT (user_id) DO UPDATE SET data = EXCLUDED.data, updated_at = now()`,
+      [req.user.id, settings],
+    );
+    res.json({ settings });
+  } catch (e) { fail(res, e, 'Could not save settings.'); }
+});
+
 // "Delete my account": removes the user and every activity (ON DELETE CASCADE), then signs out
 app.delete('/api/account', authed, async (req, res) => {
   try {
@@ -366,7 +482,7 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ error: 'Unexpected server error.' });
 });
 
-if (!process.env.VERCEL) {
+if (!process.env.VERCEL && !process.env.NO_LISTEN) { // tests import the app and listen themselves
   const port = process.env.PORT || 3000;
   app.listen(port, () => console.log(`Dincharya running on http://localhost:${port}`));
 }
