@@ -120,10 +120,13 @@ app.post('/api/transcribe', rateLimit, upload.single('audio'), async (req, res) 
 // ---------- what they said -> activity records ----------
 // The model returns times as small specs ("now", "30 minutes ago", "at 14:00", "for 90 minutes");
 // the browser turns them into real timestamps, so date arithmetic never depends on the model.
+const mealAt = (min) => { const h = (((min % 1440) + 1440) % 1440) / 60; return h < 11 ? 'Breakfast' : h < 16 ? 'Lunch' : h < 19 ? 'Snacks' : 'Dinner'; };
+
 const UNDERSTAND_SYSTEM = (now, weekday, current, code) => `You turn what a person says about their day into activity records. They speak English, Hindi, Hinglish or any Indian language; the text may come from speech recognition and have small mistakes.
 
 Current local date and time: ${now} (${weekday}).
 Current activity: ${current || 'none'}.
+If they say they are eating now without naming the meal, it is "${/T\d\d:\d\d/.test(now) ? mealAt(Number(now.slice(11, 13)) * 60 + Number(now.slice(14, 16))) : 'Meal'}"; use that word in the title and the reply.
 
 Reply with ONLY a JSON object:
 {"action":"start|stop|log|unclear","activities":[{"title":"","category":"","start":{"type":"now|ago|at","minutes":0,"time":"HH:MM","day":"today|yesterday"},"end":{"type":"open|duration|at|now","minutes":0,"time":"HH:MM"},"note":""}],"reply":""}
@@ -136,11 +139,12 @@ Actions:
 
 When one activity follows another ("phir", "then", "uske baad", "after that"), it starts when the previous one ended; never give an activity the same start and end.
 Times are 24-hour "HH:MM". Infer am/pm from the current time and common sense: at 13:00, "2 se 5" means 14:00 to 17:00; "subah 7" is 07:00; "raat 11" is 23:00; "dopahar 2" is 14:00. Use day "yesterday" only when they say kal/yesterday about the past.
-"title": short, 1 to 4 words, in the words they used, first letter capital (e.g. "DSA practice", "Lunch", "Break", "Gym", "Project meeting").
+"title": a short name for the activity, 1 to 4 words, first letter capital, naming the activity rather than repeating their verb ("DSA karungi" -> "DSA practice", "so rahi hoon" -> "Sleep", "khana kha rahi hoon" -> the meal for that time of day (before 11:00 "Breakfast", 11:00-16:00 "Lunch", 16:00-19:00 "Snacks", after 19:00 "Dinner"), "meeting mein hoon" -> "Meeting"). Keep their own words for specific things (a subject, project or person).
 "category": one of ${CATEGORIES.join(', ')}.
 "note": extra detail they gave, or "".
 "reply": one short, friendly sentence confirming what you recorded (or, for "unclear", asking them to try again with an example), in ${replyIn(code)}. No markdown, no emojis.`;
 
+const GENERIC_MEALS = new Set(['breakfast', 'lunch', 'dinner', 'snacks', 'meal', 'khana', 'food', 'nashta', 'eating']);
 const TIME_RE = /^([01]?\d|2[0-3]):[0-5]\d$/;
 function cleanSpec(spec, kind) {
   const type = String(spec?.type || '');
@@ -181,10 +185,20 @@ app.post('/api/understand', rateLimit, async (req, res) => {
       end: cleanSpec(a?.end, 'end'),
       note: String(a?.note || '').trim().slice(0, 200),
     })).filter((a) => a.title);
+    let mealFix = '';
+    // generic meal names follow the clock (the model isn't reliable about this)
+    const nowMin = /T(\d\d):(\d\d)/.test(now) ? Number(now.slice(11, 13)) * 60 + Number(now.slice(14, 16)) : null;
+    for (const a of activities) {
+      if (a.category !== 'meal' || !GENERIC_MEALS.has(a.title.toLowerCase()) || nowMin == null) continue;
+      const startMin = a.start.type === 'at' ? Number(a.start.time.slice(0, 2)) * 60 + Number(a.start.time.slice(3)) : a.start.type === 'ago' ? nowMin - a.start.minutes : nowMin;
+      const fixed = mealAt(startMin);
+      if (fixed !== a.title) { a.title = fixed; mealFix = fixed; }
+    }
     if (action === 'start') activities = activities.slice(0, 1);
     if ((action === 'start' || action === 'log') && !activities.length) action = 'unclear';
     if (action === 'stop' || action === 'unclear') activities = [];
-    const reply = typeof parsed.reply === 'string' ? parsed.reply.trim().slice(0, 300) : '';
+    let reply = typeof parsed.reply === 'string' ? parsed.reply.trim().slice(0, 300) : '';
+    if (mealFix) reply = reply.replace(/\b(breakfast|lunch|dinner|snacks?)\b/gi, mealFix.toLowerCase());
 
     const audio = req.body?.speak && reply ? await speakQuietly(reply, code) : null;
     res.json({ action, activities, reply, audio });
@@ -209,14 +223,14 @@ app.post('/api/summary', rateLimit, async (req, res) => {
 });
 
 // ---------- cloud sync (Postgres) ----------
-// Single-user app: one passcode (DIN_PASSCODE) unlocks the log. The browser keeps its own copy and
+// Single-user app: one passcode (SYNC_PASSCODE) unlocks the log. The browser keeps its own copy and
 // syncs changes; each row carries updated_at (last write wins) and synced_at (server cursor).
 const db = process.env.DATABASE_URL
   ? new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 3, ssl: /localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL) ? false : { rejectUnauthorized: false } })
   : null;
 let schemaReady = null;
 const ensureSchema = () => (schemaReady ??= db.query(`
-  CREATE TABLE IF NOT EXISTS din_entries (
+  CREATE TABLE IF NOT EXISTS dincharya_entries (
     id text PRIMARY KEY,
     title text NOT NULL,
     category text NOT NULL,
@@ -227,13 +241,13 @@ const ensureSchema = () => (schemaReady ??= db.query(`
     updated_at timestamptz NOT NULL,
     synced_at timestamptz NOT NULL DEFAULT now()
   );
-  CREATE INDEX IF NOT EXISTS din_entries_synced ON din_entries (synced_at);
+  CREATE INDEX IF NOT EXISTS dincharya_entries_synced ON dincharya_entries (synced_at);
 `).catch((e) => { schemaReady = null; throw e; }));
 
 function requireSync(req) {
   if (!db) throw new ApiError('Cloud sync is not set up on the server.', 503);
-  const want = process.env.DIN_PASSCODE || '';
-  const got = String(req.get('x-din-passcode') || '');
+  const want = process.env.SYNC_PASSCODE || '';
+  const got = String(req.get('x-sync-passcode') || '');
   const ok = want && got.length === want.length && crypto.timingSafeEqual(Buffer.from(got), Buffer.from(want));
   if (!ok) throw new ApiError('Wrong passcode.', 401);
 }
@@ -250,7 +264,7 @@ app.get('/api/entries', async (req, res) => {
     await ensureSchema();
     const since = asDate(req.query.since);
     const { rows } = await db.query(
-      `SELECT id, title, category, start_at, end_at, note, deleted, updated_at, synced_at FROM din_entries
+      `SELECT id, title, category, start_at, end_at, note, deleted, updated_at, synced_at FROM dincharya_entries
        WHERE ($1::timestamptz IS NULL OR synced_at > $1) ORDER BY synced_at LIMIT 5000`,
       [since],
     );
@@ -276,12 +290,12 @@ app.post('/api/entries', async (req, res) => {
       const start = asDate(e?.start), updated = asDate(e?.updatedAt), end = e?.end ? asDate(e.end) : null;
       if (!ID_RE.test(String(e?.id)) || !start || !updated) continue;
       const r = await db.query(
-        `INSERT INTO din_entries (id, title, category, start_at, end_at, note, deleted, updated_at, synced_at)
+        `INSERT INTO dincharya_entries (id, title, category, start_at, end_at, note, deleted, updated_at, synced_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, clock_timestamp())
          ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, category = EXCLUDED.category, start_at = EXCLUDED.start_at,
            end_at = EXCLUDED.end_at, note = EXCLUDED.note, deleted = EXCLUDED.deleted, updated_at = EXCLUDED.updated_at,
            synced_at = clock_timestamp()
-         WHERE din_entries.updated_at < EXCLUDED.updated_at`,
+         WHERE dincharya_entries.updated_at < EXCLUDED.updated_at`,
         [e.id, String(e.title || '').slice(0, 60) || 'Untitled', CATEGORIES.includes(e.category) ? e.category : 'other',
           start, end, String(e.note || '').slice(0, 200), !!e.deleted, updated],
       );
@@ -300,7 +314,7 @@ app.use((err, _req, res, _next) => {
 
 if (!process.env.VERCEL) {
   const port = process.env.PORT || 3000;
-  app.listen(port, () => console.log(`Din running on http://localhost:${port}`));
+  app.listen(port, () => console.log(`Dincharya running on http://localhost:${port}`));
 }
 
 export default app;

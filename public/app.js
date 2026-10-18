@@ -1,7 +1,7 @@
-// Din: a voice-first log of your day.
+// Dincharya: a voice-first log of your day.
 // Everything is saved in this browser first (instant, works offline) and synced to the server's
 // database when a passcode is set, so a refresh, a cleared browser or a new phone loses nothing.
-const KEYS = { entries: 'din.entries.v1', dirty: 'din.dirty.v1', cursor: 'din.cursor.v1', pass: 'din.passcode', lang: 'din.lang', voice: 'din.voice', alerts: 'din.alerts', resume: 'din.resume' };
+const KEYS = { entries: 'dincharya.entries.v1', dirty: 'dincharya.dirty.v1', cursor: 'dincharya.cursor.v1', pass: 'dincharya.passcode', lang: 'dincharya.lang', voice: 'dincharya.voice', alerts: 'dincharya.alerts', resume: 'dincharya.resume' };
 const MAX_SECONDS = 28; // Sarvam REST speech-to-text accepts up to 30 s
 const CATS = {
   work: 'Work', study: 'Study', meal: 'Meal', break: 'Break', exercise: 'Exercise', sleep: 'Sleep',
@@ -588,7 +588,7 @@ async function syncNow() {
   if (syncing) { syncAgain = true; return; }
   syncing = true;
   syncState('saving', 'Syncing…');
-  const headers = { 'Content-Type': 'application/json', 'x-din-passcode': passcode() };
+  const headers = { 'Content-Type': 'application/json', 'x-sync-passcode': passcode() };
   try {
     // push local changes
     const ids = [...dirty];
@@ -663,7 +663,7 @@ $('settings-save').onclick = () => {
 };
 $('export-btn').onclick = () => {
   const blob = new Blob([JSON.stringify(live(), null, 2)], { type: 'application/json' });
-  const a = el('a', { href: URL.createObjectURL(blob), download: `din-log-${dayKey(new Date())}.json` });
+  const a = el('a', { href: URL.createObjectURL(blob), download: `dincharya-log-${dayKey(new Date())}.json` });
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 };

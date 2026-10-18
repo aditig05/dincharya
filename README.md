@@ -1,12 +1,14 @@
-# Din (दिन)
+# Dincharya (दिनचर्या)
 
-**Say what you're doing. Din records when.**
+**Say what you're doing. Dincharya keeps your day.**
 
-A voice-first log of your day. Speak naturally, in English, Hindi, Hinglish or any Indian language, and Din turns it into a timeline you can look back on, day by day.
+*Dincharya (दिनचर्या) means "daily routine" in Hindi.*
+
+A voice-first log of your day. Speak naturally, in English, Hindi, Hinglish or any Indian language, and Dincharya turns it into a timeline you can look back on, day by day.
 
 ## What you can say
 
-| You say | Din records |
+| You say | Dincharya records |
 |---|---|
 | "Taking a break for half an hour" | Break, now → 30 min from now, with a countdown |
 | "Ab 3 ghante DSA karungi" | DSA practice, now → 3 hours from now |
@@ -37,8 +39,8 @@ A voice-first log of your day. Speak naturally, in English, Hindi, Hinglish or a
 
 ```bash
 npm install
-cp .env.example .env      # add SARVAM_API_KEY; DATABASE_URL and DIN_PASSCODE for sync
+cp .env.example .env      # add SARVAM_API_KEY; DATABASE_URL and SYNC_PASSCODE for sync
 npm start
 ```
 
-Open http://localhost:3000. Without `DATABASE_URL`, Din still works and keeps the log in the browser.
+Open http://localhost:3000. Without `DATABASE_URL`, Dincharya still works and keeps the log in the browser.

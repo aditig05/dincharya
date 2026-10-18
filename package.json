@@ -1,7 +1,7 @@
 {
-  "name": "din",
+  "name": "dincharya",
   "version": "1.0.0",
-  "description": "Din: a voice-first log of your day. Say what you're doing; it records when. Built with Sarvam AI.",
+  "description": "Dincharya: a voice-first log of your day. Say what you're doing; it records when. Built with Sarvam AI.",
   "type": "module",
   "main": "server.js",
   "scripts": {
