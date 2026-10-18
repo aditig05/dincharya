@@ -1,7 +1,7 @@
 // Dincharya: a voice-first log of your day.
 // Everything is saved in this browser first (instant, works offline) and synced to the server's
 // database when a passcode is set, so a refresh, a cleared browser or a new phone loses nothing.
-const KEYS = { entries: 'dincharya.entries.v1', dirty: 'dincharya.dirty.v1', cursor: 'dincharya.cursor.v1', pass: 'dincharya.passcode', lang: 'dincharya.lang', voice: 'dincharya.voice', alerts: 'dincharya.alerts', resume: 'dincharya.resume' };
+const KEYS = { nudges: 'dincharya.nudges', nudged: 'dincharya.nudged', installNo: 'dincharya.install-no', entries: 'dincharya.entries.v1', dirty: 'dincharya.dirty.v1', cursor: 'dincharya.cursor.v1', pass: 'dincharya.passcode', lang: 'dincharya.lang', voice: 'dincharya.voice', alerts: 'dincharya.alerts', resume: 'dincharya.resume' };
 const MAX_SECONDS = 28; // Sarvam REST speech-to-text accepts up to 30 s
 const CATS = {
   work: 'Work', study: 'Study', meal: 'Meal', break: 'Break', exercise: 'Exercise', sleep: 'Sleep',
@@ -240,6 +240,7 @@ async function understand(text) {
         current: describeCurrent(), language_code: $('lang').value, speak: $('voice').checked,
       }),
     });
+    if (data.action === 'question') { await askLog(text); return; }
     if (data.action === 'unclear') { setReply(data.reply || 'Try: “taking a 15 minute break”.', true); play(data.audio); return; }
     const result = applyUnderstanding(data);
     if (!result.ok) { setReply(result.message, true); return; }
@@ -367,9 +368,7 @@ function checkAlerts() {
   if (!e || alerted.has(e.id) || Date.now() - new Date(e.end).getTime() > 2 * MIN) return;
   alerted.add(e.id);
   chime();
-  if ($('alerts').checked && 'Notification' in window && Notification.permission === 'granted') {
-    try { new Notification(`${e.title} is over`, { body: 'Tap to log what you do next.', tag: e.id }); } catch { /* some mobile browsers need a service worker */ }
-  }
+  if ($('alerts').checked) notify(`${e.title} is over`, 'Tap to log what you do next.', e.id);
 }
 function chime() {
   try {
@@ -495,7 +494,7 @@ function dayFacts(key) {
   ].filter(Boolean).join('\n');
 }
 
-function render() { renderNow(); renderDay(); }
+function render() { renderNow(); renderDay(); renderWeek(); }
 
 $('prev-day').onclick = () => { selectedDay = dayKey(addDays(fromDayKey(selectedDay), -1)); renderDay(); };
 $('next-day').onclick = () => { selectedDay = dayKey(addDays(fromDayKey(selectedDay), 1)); renderDay(); };
@@ -643,6 +642,7 @@ setInterval(syncNow, 60 * 1000);
 $('lang').value = store.get(KEYS.lang, 'en-IN');
 $('voice').checked = store.get(KEYS.voice, true);
 $('alerts').checked = store.get(KEYS.alerts, false);
+$('nudges').checked = store.get(KEYS.nudges, true);
 $('passcode').value = passcode();
 $('settings-btn').onclick = () => $('settings').showModal();
 $('sync').onclick = () => $('settings').showModal();
@@ -650,6 +650,8 @@ $('settings-save').onclick = () => {
   store.set(KEYS.lang, $('lang').value);
   store.set(KEYS.voice, $('voice').checked);
   store.set(KEYS.alerts, $('alerts').checked);
+  store.set(KEYS.nudges, $('nudges').checked);
+  checkNudges();
   const p = $('passcode').value.trim();
   if (p !== passcode()) {
     store.set(KEYS.pass, p);
@@ -668,6 +670,255 @@ $('export-btn').onclick = () => {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 };
 
+
+// ---------- per-day numbers (shared by week view, questions and nudges) ----------
+function dayStats(key) {
+  const [ds, de] = dayBounds(key);
+  const now = Date.now();
+  const by = new Map(), count = new Map();
+  for (const x of entriesOn(key)) {
+    const s = Math.max(ds, new Date(x.start).getTime());
+    const e = Math.min(de, now, x.end ? new Date(x.end).getTime() : now);
+    if (e <= s) continue;
+    by.set(x.category, (by.get(x.category) || 0) + (e - s));
+    if (new Date(x.start).getTime() >= ds) count.set(x.category, (count.get(x.category) || 0) + 1); // count where it started
+  }
+  return { by, count, total: [...by.values()].reduce((a, b) => a + b, 0) };
+}
+const statLine = (st) => [...st.by].sort((a, b) => b[1] - a[1]).map(([c, ms]) => `${CATS[c] || c} ${fmtDur(ms)}${st.count.get(c) ? ` (${st.count.get(c)}×)` : ''}`).join(', ') || 'nothing logged';
+
+// ---------- ask your log ----------
+function logForQuestions() {
+  const today = new Date();
+  const lines = [];
+  const week = { by: new Map(), count: new Map() }, last7 = { by: new Map(), count: new Map() };
+  const monday = addDays(today, -((today.getDay() + 6) % 7));
+  for (let i = 13; i >= 0; i--) {
+    const d = addDays(today, -i), key = dayKey(d);
+    const st = dayStats(key);
+    const label = i === 0 ? 'Today' : i === 1 ? 'Yesterday' : '';
+    const acts = entriesOn(key).filter((x) => dayKey(new Date(x.start)) === key)
+      .map((x) => `${hhmm(new Date(x.start))}-${x.end ? hhmm(new Date(x.end)) : 'now'} ${x.title} (${x.category})`);
+    if (acts.length || st.total) lines.push(`${d.toDateString()}${label ? ` [${label}]` : ''}: ${acts.join('; ') || '-'} | totals: ${statLine(st)}`);
+    for (const [target, ok] of [[week, d >= monday], [last7, i < 7]]) {
+      if (!ok) continue;
+      for (const [c, ms] of st.by) target.by.set(c, (target.by.get(c) || 0) + ms);
+      for (const [c, n] of st.count) target.count.set(c, (target.count.get(c) || 0) + n);
+    }
+  }
+  // how many times each named activity happened, e.g. "Gym 4×"
+  const named = (from) => {
+    const m = new Map();
+    for (const x of live()) {
+      const s = new Date(x.start);
+      if (s < from || s > today) continue;
+      const k = x.title.trim().toLowerCase();
+      const v = m.get(k) || { title: x.title.trim(), n: 0, ms: 0 };
+      v.n++; v.ms += Math.max(0, (x.end ? new Date(x.end) : today) - s);
+      m.set(k, v);
+    }
+    return [...m.values()].sort((a, b) => b.n - a.n).map((v) => `${v.title} ${v.n}× (${fmtDur(v.ms)})`).join(', ') || 'none';
+  };
+  const mondayStart = fromDayKey(dayKey(monday)), weekAgo = fromDayKey(dayKey(addDays(today, -6)));
+  return `Log for the last 14 days:\n${lines.join('\n') || '(empty)'}\n\nThis week so far (since Monday), by type: ${statLine(week)}\nThis week so far, by activity: ${named(mondayStart)}\nLast 7 days, by type: ${statLine(last7)}\nLast 7 days, by activity: ${named(weekAgo)}`;
+}
+
+async function askLog(question) {
+  setReply('Looking through your days…');
+  const data = await api('/api/ask', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question, log: logForQuestions(), today: new Date().toDateString(), language_code: $('lang').value }),
+  });
+  setReply(data.answer);
+  play(data.audio);
+  $('say-text').value = '';
+}
+
+// ---------- week view ----------
+let view = 'day';
+let weekStart = (() => { const t = fromDayKey(dayKey(new Date())); return addDays(t, -((t.getDay() + 6) % 7)); })(); // Monday
+const FLAME = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13.5 1s1 3.5-1.5 6.5C9.6 10.4 8 12 8 15a4 4 0 0 0 8 0c0-1.5-.6-2.8-1.3-3.9 2.6 1.1 4.3 3.4 4.3 6.4A7 7 0 0 1 5 17.5C5 9 13.5 7 13.5 1Z"/></svg>';
+
+function setView(v) {
+  view = v;
+  $('tab-day').setAttribute('aria-selected', String(v === 'day'));
+  $('tab-week').setAttribute('aria-selected', String(v === 'week'));
+  $('day-view').hidden = v !== 'day';
+  $('week-view').hidden = v !== 'week';
+  if (v === 'week') { const d = fromDayKey(selectedDay); weekStart = addDays(d, -((d.getDay() + 6) % 7)); renderWeek(); }
+}
+$('tab-day').onclick = () => setView('day');
+$('tab-week').onclick = () => setView('week');
+$('prev-week').onclick = () => { weekStart = addDays(weekStart, -7); renderWeek(); };
+$('next-week').onclick = () => { weekStart = addDays(weekStart, 7); renderWeek(); };
+
+// consecutive days (ending today, or yesterday if today has none yet) with at least 15 min of a type
+function streaks() {
+  const out = [];
+  for (const cat of Object.keys(CATS)) {
+    if (['sleep', 'meal', 'break', 'other', 'commute', 'chores', 'leisure'].includes(cat)) continue;
+    let n = 0;
+    const has = (i) => (dayStats(dayKey(addDays(new Date(), -i))).by.get(cat) || 0) >= 15 * MIN;
+    let i = has(0) ? 0 : 1;
+    while (i < 366 && has(i)) { n++; i++; }
+    if (n >= 2) out.push([cat, n]);
+  }
+  return out.sort((a, b) => b[1] - a[1]);
+}
+
+function renderWeek() {
+  if (view !== 'week') return;
+  const todayKey = dayKey(new Date());
+  const thisMonday = (() => { const t = fromDayKey(todayKey); return addDays(t, -((t.getDay() + 6) % 7)); })();
+  const end = addDays(weekStart, 6);
+  $('week-h').textContent = dayKey(weekStart) === dayKey(thisMonday) ? 'This week' : dayKey(weekStart) === dayKey(addDays(thisMonday, -7)) ? 'Last week' : 'Week';
+  $('week-range').textContent = `${weekStart.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })} – ${end.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}`;
+  $('next-week').disabled = weekStart >= thisMonday;
+
+  // streaks only make sense for the current week
+  const sbox = $('streaks');
+  sbox.replaceChildren();
+  if (dayKey(weekStart) === dayKey(thisMonday)) {
+    for (const [cat, n] of streaks()) {
+      const chip = el('span', { className: 'streak' });
+      chip.innerHTML = FLAME;
+      chip.append(`${CATS[cat]} streak: ${n} days`);
+      sbox.append(chip);
+    }
+  }
+
+  const days = [...Array(7)].map((_, i) => { const d = addDays(weekStart, i); return { d, key: dayKey(d), st: dayStats(dayKey(d)) }; });
+  const week = new Map(), counts = new Map();
+  for (const { st } of days) {
+    for (const [c, ms] of st.by) week.set(c, (week.get(c) || 0) + ms);
+    for (const [c, n] of st.count) counts.set(c, (counts.get(c) || 0) + n);
+  }
+  const sorted = [...week].filter(([, ms]) => ms > 0).sort((a, b) => b[1] - a[1]);
+  const all = sorted.reduce((a, [, ms]) => a + ms, 0);
+  const tbox = $('week-totals');
+  tbox.replaceChildren();
+  if (all) {
+    const stack = el('div', { className: 'stack' });
+    const legend = el('div', { className: 'legend' });
+    for (const [cat, ms] of sorted) {
+      const seg = el('span'); seg.style.setProperty('--c', catVar(cat)); seg.style.flex = String(ms); stack.append(seg);
+      const item = el('span', {}, el('i'), CATS[cat], ' ', el('b', { textContent: fmtDur(ms) }));
+      item.style.setProperty('--c', catVar(cat)); legend.append(item);
+    }
+    tbox.append(stack, legend);
+  }
+
+  const max = Math.max(...days.map((x) => x.st.total), 1);
+  const ol = $('week-days');
+  ol.replaceChildren();
+  for (const { d, key, st } of days) {
+    const btn = el('button', { className: 'wd' + (key === todayKey ? ' today' : ''), type: 'button', title: 'Open this day' });
+    const bar = el('div', { className: 'wd-bar' });
+    bar.style.width = `${Math.max(2, (st.total / max) * 100)}%`;
+    for (const [cat, ms] of [...st.by].sort((a, b) => b[1] - a[1])) { const seg = el('span'); seg.style.setProperty('--c', catVar(cat)); seg.style.flex = String(ms); bar.append(seg); }
+    btn.append(
+      el('span', { className: 'wd-name' }, d.toLocaleDateString('en-IN', { weekday: 'short' }), el('small', { textContent: d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }) })),
+      el('div', {}, bar),
+      el('span', { className: 'wd-total', textContent: st.total ? fmtDur(st.total) : key > todayKey ? '' : '–' }),
+    );
+    btn.disabled = key > todayKey;
+    btn.onclick = () => { selectedDay = key; setView('day'); renderDay(); };
+    ol.append(el('li', {}, btn));
+  }
+
+  const facts = $('week-facts');
+  facts.replaceChildren();
+  const fact = (...parts) => facts.append(el('li', {}, ...parts));
+  if (!all) { fact('Nothing logged this week yet.'); return; }
+  const focused = (week.get('work') || 0) + (week.get('study') || 0);
+  const logged = days.filter((x) => x.st.total > 0).length;
+  if (focused) fact('Focused (work + study): ', el('b', { textContent: fmtDur(focused) }), ` · about ${fmtDur(focused / logged)} a day on days you logged`);
+  if (counts.get('break')) fact('Breaks: ', el('b', { textContent: `${counts.get('break')}` }), ` · average ${fmtDur((week.get('break') || 0) / counts.get('break'))}`);
+  if (counts.get('exercise')) fact('Exercise: ', el('b', { textContent: `${counts.get('exercise')} ${counts.get('exercise') === 1 ? 'time' : 'times'}` }), `, ${fmtDur(week.get('exercise'))} in total`);
+  const best = days.reduce((m, x) => { const f = (x.st.by.get('work') || 0) + (x.st.by.get('study') || 0); return f > m.f ? { f, d: x.d } : m; }, { f: 0, d: null });
+  if (best.f) fact('Most focused day: ', el('b', { textContent: best.d.toLocaleDateString('en-IN', { weekday: 'long' }) }), ` (${fmtDur(best.f)})`);
+  if (week.get('sleep')) fact('Sleep logged: ', el('b', { textContent: fmtDur(week.get('sleep')) }));
+}
+
+// ---------- gentle nudges ----------
+// Checked once a minute while the app is open. Each nudge fires once (remembered per day).
+function nudgeKey(id) { return `${dayKey(new Date())}:${id}`; }
+function findNudge(now = new Date()) {
+  const t = now.getTime(), h = now.getHours() + now.getMinutes() / 60;
+  const cur = current(t);
+  const today = dayKey(now);
+  const st = dayStats(today);
+  const loggedToday = st.total > 0;
+  if (cur) {
+    const ran = t - new Date(cur.start).getTime();
+    if (cur.category === 'break' && !cur.end && ran > 45 * MIN) return { id: `long-break-${cur.id}`, text: `You've been on a break for ${fmtDur(ran)}. Ready to get back?`, actions: ['done'] };
+    if (cur.category === 'meal' && !cur.end && ran > 75 * MIN) return { id: `long-meal-${cur.id}`, text: `${cur.title} has been running for ${fmtDur(ran)}. Finished?`, actions: ['done'] };
+    if (['work', 'study'].includes(cur.category) && ran > 2 * 60 * MIN) {
+      const hrs = Math.floor(ran / (60 * MIN));
+      return { id: `long-focus-${cur.id}-${hrs}`, text: `${fmtDur(ran)} of ${cur.title} without a break. A 10-minute break?`, actions: ['break10'] };
+    }
+  }
+  const meals = entriesOn(today).filter((x) => x.category === 'meal');
+  const mealBetween = (a, b) => meals.some((x) => { const mh = new Date(x.start).getHours(); return mh >= a && mh < b; });
+  if (loggedToday && h >= 14.5 && h < 17 && !mealBetween(11, 17)) return { id: 'no-lunch', text: 'No lunch logged yet today. Eaten something?', actions: ['lunch'] };
+  if (loggedToday && h >= 21.5 && !mealBetween(18, 24)) return { id: 'no-dinner', text: 'No dinner logged yet tonight.', actions: ['dinner'] };
+  if (!cur && loggedToday && h >= 9 && h < 23) {
+    const lastEnd = Math.max(...live().map((x) => (x.end ? new Date(x.end).getTime() : t)).filter((v) => v <= t));
+    if (Number.isFinite(lastEnd) && t - lastEnd > 2 * 60 * MIN) return { id: `gap-${Math.floor(lastEnd / MIN)}`, text: `Nothing logged since ${fmtTime(new Date(lastEnd))}. What have you been up to?`, actions: ['log'] };
+  }
+  return null;
+}
+const NUDGE_ACTIONS = {
+  done: ['Done', () => applyUnderstanding({ action: 'stop', activities: [] })],
+  break10: ['Break 10m', () => startQuick('Break', 'break', 10)],
+  lunch: ['Log lunch', () => $('say-text').focus()],
+  dinner: ['Log dinner', () => $('say-text').focus()],
+  log: ['Log it', () => $('say-text').focus()],
+};
+function checkNudges() {
+  if (!$('nudges').checked) { $('nudge').hidden = true; return; }
+  const n = findNudge();
+  const done = new Set(store.get(KEYS.nudged, []));
+  if (!n || done.has(nudgeKey(n.id))) { if (!n) $('nudge').hidden = true; return; }
+  $('nudge-text').textContent = n.text;
+  const box = $('nudge-actions');
+  box.replaceChildren();
+  const close = () => { done.add(nudgeKey(n.id)); store.set(KEYS.nudged, [...done].slice(-60)); $('nudge').hidden = true; };
+  for (const a of n.actions) { const [label, fn] = NUDGE_ACTIONS[a]; box.append(button(label, () => { close(); fn(); }, 'primary')); }
+  box.append(button('Dismiss', close));
+  if ($('nudge').hidden) { // first time this nudge shows
+    $('nudge').hidden = false;
+    if ($('alerts').checked) notify('Dincharya', n.text, n.id);
+  }
+}
+
+// ---------- install on the home screen + notifications ----------
+let swReg = null;
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').then((r) => { swReg = r; }).catch(() => {});
+}
+function notify(title, body, tag) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  const opts = { body, tag, icon: 'icon-192.png', badge: 'icon-192.png' };
+  if (swReg?.showNotification) swReg.showNotification(title, opts).catch(() => {});
+  else { try { new Notification(title, opts); } catch { /* not supported here */ } }
+}
+let installEvent = null;
+window.addEventListener('beforeinstallprompt', (ev) => {
+  ev.preventDefault();
+  installEvent = ev;
+  if (!store.get(KEYS.installNo, false)) $('install').hidden = false;
+});
+$('install-btn').onclick = async () => {
+  $('install').hidden = true;
+  if (!installEvent) return;
+  installEvent.prompt();
+  await installEvent.userChoice.catch(() => {});
+  installEvent = null;
+};
+$('install-close').onclick = () => { $('install').hidden = true; store.set(KEYS.installNo, true); };
+window.addEventListener('appinstalled', () => { $('install').hidden = true; });
+
 // ---------- toast ----------
 let toastTimer = null;
 function toast(msg, undo) {
@@ -682,12 +933,13 @@ function toast(msg, undo) {
 // ---------- start ----------
 render();
 initSync();
+checkNudges();
 let lastMinute = new Date().getMinutes();
 setInterval(() => {
   renderNow();
   checkAlerts();
   const m = new Date().getMinutes();
-  if (m !== lastMinute) { lastMinute = m; renderDay(); } // durations tick on the timeline once a minute
+  if (m !== lastMinute) { lastMinute = m; renderDay(); renderWeek(); checkNudges(); } // once a minute
   if (selectedDay !== dayKey(new Date()) && selectedDay === dayKey(addDays(new Date(), -1)) && new Date().getHours() === 0 && new Date().getMinutes() === 0) {
     selectedDay = dayKey(new Date()); renderDay(); // roll over at midnight
   }

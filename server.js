@@ -129,12 +129,13 @@ Current activity: ${current || 'none'}.
 If they say they are eating now without naming the meal, it is "${/T\d\d:\d\d/.test(now) ? mealAt(Number(now.slice(11, 13)) * 60 + Number(now.slice(14, 16))) : 'Meal'}"; use that word in the title and the reply.
 
 Reply with ONLY a JSON object:
-{"action":"start|stop|log|unclear","activities":[{"title":"","category":"","start":{"type":"now|ago|at","minutes":0,"time":"HH:MM","day":"today|yesterday"},"end":{"type":"open|duration|at|now","minutes":0,"time":"HH:MM"},"note":""}],"reply":""}
+{"action":"start|stop|log|question|unclear","activities":[{"title":"","category":"","start":{"type":"now|ago|at","minutes":0,"time":"HH:MM","day":"today|yesterday"},"end":{"type":"open|duration|at|now","minutes":0,"time":"HH:MM"},"note":""}],"reply":""}
 
 Actions:
 - "start": they are starting something now ("taking a break", "lunch kar rahi hoon", "ab 3 ghante DSA karungi", "going to the gym", "sone ja rahi hoon"). Exactly one activity. start.type is "now", unless they say they began earlier ("10 min pehle shuru kiya" = ago 10) or give a start clock time. end.type is "duration" if they give a length ("half an hour" = 30, "dedh ghanta" = 90, "3 hours" = 180, "15 min" = 15), "at" if they give an end time ("5 baje tak"), otherwise "open".
 - "log": they describe something already finished ("2 se 5 tak DSA kiya", "subah 1 ghanta gym gayi thi", "had lunch from 1 to 1:30", "kal raat 11 se 7 tak soyi"). One or more activities with start "at"/"ago" and end "at"/"duration"/"now".
 - "stop": they finished the current activity without starting something new ("done", "ho gaya", "break khatam", "back"). "activities" is [].
+- "question": they are asking about their log rather than recording something ("kal maine kya kiya?", "is hafte gym kitni baar gayi?", "how much did I study today?", "aaj kitna break liya?"). "activities" is [] and "reply" is "".
 - "unclear": it is not about their day, or no activity can be read. "activities" is [].
 
 When one activity follows another ("phir", "then", "uske baad", "after that"), it starts when the previous one ended; never give an activity the same start and end.
@@ -177,7 +178,7 @@ app.post('/api/understand', rateLimit, async (req, res) => {
     let parsed;
     try { parsed = extractJson(answer); } catch { throw new ApiError('Could not understand that. Please say it again.', 502); }
 
-    let action = ['start', 'stop', 'log', 'unclear'].includes(parsed.action) ? parsed.action : 'unclear';
+    let action = ['start', 'stop', 'log', 'question', 'unclear'].includes(parsed.action) ? parsed.action : 'unclear';
     let activities = (Array.isArray(parsed.activities) ? parsed.activities : []).slice(0, 8).map((a) => ({
       title: String(a?.title || '').trim().slice(0, 60),
       category: CATEGORIES.includes(a?.category) ? a.category : 'other',
@@ -196,13 +197,33 @@ app.post('/api/understand', rateLimit, async (req, res) => {
     }
     if (action === 'start') activities = activities.slice(0, 1);
     if ((action === 'start' || action === 'log') && !activities.length) action = 'unclear';
-    if (action === 'stop' || action === 'unclear') activities = [];
+    if (action === 'stop' || action === 'question' || action === 'unclear') activities = [];
     let reply = typeof parsed.reply === 'string' ? parsed.reply.trim().slice(0, 300) : '';
     if (mealFix) reply = reply.replace(/\b(breakfast|lunch|dinner|snacks?)\b/gi, mealFix.toLowerCase());
 
     const audio = req.body?.speak && reply ? await speakQuietly(reply, code) : null;
     res.json({ action, activities, reply, audio });
   } catch (e) { fail(res, e, 'Could not understand that.'); }
+});
+
+// ---------- questions about the log ----------
+// The browser sends the last two weeks as compact lines plus totals it computed itself,
+// so the model only has to look things up, never add up.
+app.post('/api/ask', rateLimit, async (req, res) => {
+  try {
+    const question = typeof req.body?.question === 'string' ? req.body.question.trim().slice(0, 400) : '';
+    if (!question) throw new ApiError('Ask something about your day.', 400);
+    const code = langCode(req.body?.language_code);
+    const log = String(req.body?.log || '').slice(0, 20000);
+    const answer = await chat([
+      {
+        role: 'system',
+        content: `You answer questions about a person's own activity log, like a helpful friend. Today is ${String(req.body?.today || '').slice(0, 40)}. Use ONLY the log and totals given. Quote durations and counts exactly as they appear in the totals; never add up or calculate new numbers. If the log does not contain the answer, say so plainly. Reply in 1 to 3 short sentences, easy to listen to, in ${replyIn(code)}. No markdown, no lists, no emojis.`,
+      },
+      { role: 'user', content: `${log}\n\nQuestion: ${question}` },
+    ], 800);
+    res.json({ answer, audio: await speakQuietly(answer, code) });
+  } catch (e) { fail(res, e, 'Could not answer that.'); }
 });
 
 // ---------- spoken summary of a day ----------

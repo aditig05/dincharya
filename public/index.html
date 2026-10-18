@@ -10,6 +10,9 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Mukta:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Crect width=%2232%22 height=%2232%22 rx=%228%22 fill=%22%231d2b3a%22/%3E%3Ccircle cx=%2216%22 cy=%2216%22 r=%229%22 fill=%22none%22 stroke=%22%23f2b544%22 stroke-width=%223%22/%3E%3Cpath d=%22M16 10v6l4 3%22 stroke=%22%23f2b544%22 stroke-width=%223%22 fill=%22none%22 stroke-linecap=%22round%22/%3E%3C/svg%3E">
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -31,6 +34,19 @@
   </header>
 
   <main class="wrap">
+    <!-- gentle nudges ("45 min on a break") -->
+    <section id="nudge" class="nudge" role="status" aria-live="polite" hidden>
+      <p id="nudge-text"></p>
+      <div class="nudge-actions" id="nudge-actions"></div>
+    </section>
+
+    <!-- add to home screen -->
+    <section id="install" class="install" hidden>
+      <p><b>Put Dincharya on your home screen</b> for one-tap logging and alerts.</p>
+      <button id="install-btn" class="btn primary" type="button">Install</button>
+      <button id="install-close" class="btn" type="button" aria-label="Not now">Not now</button>
+    </section>
+
     <!-- what is happening right now -->
     <section id="now" class="card now" aria-live="polite">
       <div class="now-label">Right now</div>
@@ -46,11 +62,11 @@
         </button>
         <form id="say-form" class="say-form">
           <label for="say-text" class="sr">What are you doing?</label>
-          <input id="say-text" type="text" autocomplete="off" placeholder="“Taking a break for 30 min” · “2 se 5 tak DSA kiya”">
+          <input id="say-text" type="text" autocomplete="off" placeholder="“Break for 30 min” · “2 se 5 tak DSA kiya” · “Kal maine kya kiya?”">
           <button id="say-go" class="btn primary" type="submit">Log</button>
         </form>
       </div>
-      <p id="mic-hint" class="hint">Tap the mic and speak, in English, Hindi or a mix. Tap again when done.</p>
+      <p id="mic-hint" class="hint">Tap the mic and say what you are doing, or ask about your days (“is hafte kitna padha?”). English, Hindi or a mix.</p>
       <div class="chips" aria-label="Quick log">
         <button class="chip" type="button" data-text="taking a break for 15 minutes">Break 15m</button>
         <button class="chip" type="button" data-text="having lunch">Lunch</button>
@@ -64,6 +80,11 @@
 
     <!-- the selected day -->
     <section class="card day" aria-labelledby="day-h">
+      <div class="seg" role="tablist" aria-label="View">
+        <button id="tab-day" class="seg-btn" role="tab" aria-selected="true" type="button">Day</button>
+        <button id="tab-week" class="seg-btn" role="tab" aria-selected="false" type="button">Week</button>
+      </div>
+      <div id="day-view">
       <div class="day-nav">
         <button id="prev-day" class="icon-btn soft" type="button" aria-label="Previous day">‹</button>
         <div class="day-title">
@@ -87,6 +108,19 @@
       <div id="summary-box" class="summary" hidden>
         <p id="summary-text"></p>
         <audio id="summary-audio" controls></audio>
+      </div>
+      </div>
+
+      <div id="week-view" hidden>
+        <div class="day-nav">
+          <button id="prev-week" class="icon-btn soft" type="button" aria-label="Previous week">‹</button>
+          <div class="day-title"><h2 id="week-h">This week</h2><span id="week-range" class="hint tight"></span></div>
+          <button id="next-week" class="icon-btn soft" type="button" aria-label="Next week">›</button>
+        </div>
+        <div id="streaks" class="streaks"></div>
+        <div id="week-totals" class="totals"></div>
+        <ol id="week-days" class="week-days"></ol>
+        <ul id="week-facts" class="week-facts"></ul>
       </div>
     </section>
 
@@ -146,6 +180,7 @@
       </label>
       <label class="check"><input id="voice" type="checkbox" checked> Speak replies out loud</label>
       <label class="check"><input id="alerts" type="checkbox"> Alert me when a timed activity ends</label>
+      <label class="check"><input id="nudges" type="checkbox" checked> Gentle nudges (long breaks, missed meals, long sessions)</label>
 
       <h4>Backup and sync</h4>
       <p id="sync-help" class="hint tight"></p>
